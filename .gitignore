@@ -1,0 +1,32 @@
+# Documents — planning docs stay local
+*.pdf
+*.md
+!README.md
+
+# Go
+/bin/
+*.exe
+*.test
+*.out
+vendor/
+
+# Node / Next.js
+node_modules/
+/web/.next/
+/web/out/
+/web/build/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Local infrastructure state
+/deploy/data/
+*.log
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
