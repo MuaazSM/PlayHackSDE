@@ -28,6 +28,10 @@ const (
 	BookingInsertShared    = "booking_insert_shared"
 	BookingLockFacility    = "booking_lock_facility"
 	BookingFindByIdem      = "booking_find_by_idem"
+	BookingGet             = "booking_get"
+	BookingCancel          = "booking_cancel"
+	BookingListMine        = "booking_list_mine"
+	UserRole               = "user_role"
 	BookingEventInsert     = "booking_event_insert"
 	CapacityTake           = "capacity_take"
 	CapacityRelease        = "capacity_release"
@@ -42,6 +46,10 @@ var required = []string{
 	BookingInsertShared,
 	BookingLockFacility,
 	BookingFindByIdem,
+	BookingGet,
+	BookingCancel,
+	BookingListMine,
+	UserRole,
 	BookingEventInsert,
 	CapacityTake,
 	CapacityRelease,

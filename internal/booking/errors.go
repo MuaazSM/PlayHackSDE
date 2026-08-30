@@ -41,6 +41,13 @@ var (
 	// ErrForbidden means the caller may not act on this booking. Maps to 403.
 	ErrForbidden = errors.New("forbidden")
 
+	// ErrNotCancellable means the booking exists but was not in a cancellable
+	// state — already cancelled, or already completed. Maps to 409.
+	//
+	// Distinct from ErrNotFound on purpose: a double cancel must not report
+	// success, and it must not claim the booking never existed either.
+	ErrNotCancellable = errors.New("booking is not cancellable")
+
 	// ErrValidation means the request was malformed or out of bounds. Maps to
 	// 422. Use ValidationError to carry the offending field.
 	ErrValidation = errors.New("validation failed")

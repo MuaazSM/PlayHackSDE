@@ -27,17 +27,24 @@ type Booking struct {
 	ID         uuid.UUID
 	Reference  string
 	FacilityID uuid.UUID
-	UserID     uuid.UUID
-	Start      time.Time
-	End        time.Time
-	Status     string
-	IdemKey    string
-	CreatedAt  time.Time
+	// FacilityName is populated by list queries that join the catalogue; the
+	// write path leaves it empty because the caller already knows the facility.
+	FacilityName string
+	UserID       uuid.UUID
+	Start        time.Time
+	End          time.Time
+	Status       string
+	IdemKey      string
+	CreatedAt    time.Time
 
 	// Replayed is true when this booking was returned for a repeated
 	// Idempotency-Key rather than created by this request. The API returns 200
 	// instead of 201 for these.
 	Replayed bool
+
+	// isExclusive mirrors the row's denormalised flag, so cancel knows whether
+	// to release a capacity counter without a second catalogue lookup.
+	isExclusive bool
 }
 
 // CreateRequest is one booking attempt.
@@ -229,7 +236,7 @@ func (s *Service) attemptShared(ctx context.Context, f *facility.Facility, req C
 			return store.Classify(err)
 		}
 
-		if err := insertBookingEvent(ctx, tx, id, req.UserID, "CONFIRMED", "created"); err != nil {
+		if err := insertBookingEvent(ctx, tx, id, req.UserID, nil, "CONFIRMED", "created"); err != nil {
 			return store.Classify(err)
 		}
 
@@ -327,7 +334,7 @@ func (s *Service) attemptExclusive(ctx context.Context, f *facility.Facility, re
 			return store.Classify(err)
 		}
 
-		if err := insertBookingEvent(ctx, tx, id, req.UserID, "CONFIRMED", "created"); err != nil {
+		if err := insertBookingEvent(ctx, tx, id, req.UserID, nil, "CONFIRMED", "created"); err != nil {
 			return store.Classify(err)
 		}
 
@@ -434,8 +441,10 @@ func (s *Service) findByIdemKey(ctx context.Context, userID uuid.UUID, idemKey s
 	return &b, nil
 }
 
-func insertBookingEvent(ctx context.Context, q store.Querier, bookingID, actorID uuid.UUID, to, reason string) error {
-	_, err := q.Exec(ctx, queries.Get(queries.BookingEventInsert), bookingID, actorID, nil, to, reason)
+// insertBookingEvent appends to the audit trail. from is nil for a creation,
+// which has no previous status.
+func insertBookingEvent(ctx context.Context, q store.Querier, bookingID, actorID uuid.UUID, from *string, to, reason string) error {
+	_, err := q.Exec(ctx, queries.Get(queries.BookingEventInsert), bookingID, actorID, from, to, reason)
 	return err
 }
 
