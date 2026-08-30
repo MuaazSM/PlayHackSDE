@@ -66,7 +66,17 @@ func TestCancel_ReleasesSlot(t *testing.T) {
 	require.NotEqual(t, first.ID, second.ID)
 }
 
-func TestCancel_DoubleCancelIsRejected(t *testing.T) {
+// TestCancel_DoubleCancelConverges is non-negotiable #5 for the cancel path.
+//
+// Walk the retry: a student cancels, the response is lost in transit, the client
+// retries. The guarded UPDATE matches zero rows. Returning a conflict there
+// would show a scary error for an action that had in fact succeeded, so the
+// second call converges on state — the booking IS cancelled, and saying so is
+// the truth.
+//
+// What must not repeat are the side effects. The status guard exists so the
+// capacity release, the event and the outbox row fire exactly once.
+func TestCancel_DoubleCancelConverges(t *testing.T) {
 	pg := testutil.Postgres(t)
 	svc := pg.BookingService(t)
 	ctx := context.Background()
@@ -74,24 +84,64 @@ func TestCancel_DoubleCancelIsRejected(t *testing.T) {
 	start, _ := testutil.Slot18()
 	b := mustCreate(t, svc, testutil.CourtID(), testutil.StudentID(0), start, time.Hour)
 
-	_, err := svc.Cancel(ctx, b.ID, testutil.StudentID(0), "")
+	first, err := svc.Cancel(ctx, b.ID, testutil.StudentID(0), "changed my mind")
 	require.NoError(t, err)
+	require.False(t, first.Converged, "the first cancel does the work")
 
-	// A second cancel must not report success. Telling a user their booking was
-	// cancelled when this call cancelled nothing is a lie they cannot detect.
-	_, err = svc.Cancel(ctx, b.ID, testutil.StudentID(0), "")
-	require.ErrorIs(t, err, booking.ErrNotCancellable)
+	second, err := svc.Cancel(ctx, b.ID, testutil.StudentID(0), "changed my mind")
+	require.NoError(t, err, "a retried cancel must return the original result, not an error")
+	require.True(t, second.Converged, "and must be identifiable as having done nothing")
+	require.Equal(t, first.ID, second.ID)
+	require.Equal(t, "CANCELLED", second.Status)
 
-	// Distinct from a booking that never existed.
-	_, err = svc.Cancel(ctx, uuid.New(), testutil.StudentID(0), "")
-	require.ErrorIs(t, err, booking.ErrNotFound)
-	require.NotErrorIs(t, err, booking.ErrNotCancellable)
+	// Repeatedly.
+	for i := 0; i < 3; i++ {
+		again, err := svc.Cancel(ctx, b.ID, testutil.StudentID(0), "")
+		require.NoError(t, err)
+		require.True(t, again.Converged)
+	}
 
-	var events int
+	// Side effects ran exactly once.
+	var events, outboxRows int
 	require.NoError(t, pg.Pool.QueryRow(ctx,
 		`SELECT count(*) FROM booking_events WHERE booking_id = $1 AND to_status = 'CANCELLED'`,
 		b.ID).Scan(&events))
-	require.Equal(t, 1, events, "a rejected double cancel must not append an event")
+	require.Equal(t, 1, events, "a converged cancel must not append a second event")
+
+	require.NoError(t, pg.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM outbox WHERE topic = 'booking.cancelled'`).Scan(&outboxRows))
+	require.Equal(t, 1, outboxRows, "a converged cancel must not enqueue a second notification")
+
+	// A booking that never existed is still a 404, not a convergence.
+	_, err = svc.Cancel(ctx, uuid.New(), testutil.StudentID(0), "")
+	require.ErrorIs(t, err, booking.ErrNotFound)
+	require.NotErrorIs(t, err, booking.ErrNotCancellable)
+}
+
+// TestCancel_NonCancellableStateIsStillAConflict: convergence is specific to
+// CANCELLED. Any other terminal state means the caller's intent genuinely cannot
+// be satisfied, and pretending otherwise would report a failure as a success.
+func TestCancel_NonCancellableStateIsStillAConflict(t *testing.T) {
+	pg := testutil.Postgres(t)
+	svc := pg.BookingService(t)
+	ctx := context.Background()
+
+	start, _ := testutil.Slot18()
+
+	for _, status := range []string{"COMPLETED", "NO_SHOW"} {
+		t.Run(status, func(t *testing.T) {
+			pg.Reset(t)
+			b := mustCreate(t, svc, testutil.CourtID(), testutil.StudentID(0), start, time.Hour)
+
+			_, err := pg.Pool.Exec(ctx,
+				`UPDATE bookings SET status = $2::booking_status WHERE id = $1`, b.ID, status)
+			require.NoError(t, err)
+
+			_, err = svc.Cancel(ctx, b.ID, testutil.StudentID(0), "")
+			require.ErrorIs(t, err, booking.ErrNotCancellable)
+			require.Equal(t, status, statusOf(t, pg, b.ID), "and nothing may change")
+		})
+	}
 }
 
 func TestCancel_NotOwnerForbidden(t *testing.T) {
@@ -201,18 +251,31 @@ func TestCancel_ConcurrentDoubleCancel(t *testing.T) {
 		start, _ := testutil.Slot18()
 		b := mustCreate(t, svc, testutil.CourtID(), testutil.StudentID(0), start, time.Hour)
 
-		out := testutil.Race(t, 2, func(ctx context.Context, i int) (any, error) {
+		out := testutil.Race(t, 8, func(ctx context.Context, i int) (any, error) {
 			return svc.Cancel(ctx, b.ID, testutil.StudentID(0), "")
 		})
 
-		require.Len(t, out.Successes(), 1, "exactly one cancel may win")
-		require.Equal(t, 1, out.CountIs(booking.ErrNotCancellable), "the loser must get a clean 409")
+		// Every caller gets a truthful answer — the booking is cancelled — but
+		// exactly one of them did the work.
+		require.Len(t, out.Failures(), 0, "a concurrent retry must not surface an error")
+
+		var performed, converged int
+		for _, a := range out.Attempts {
+			if a.Value.(*booking.Booking).Converged {
+				converged++
+			} else {
+				performed++
+			}
+			require.Equal(t, "CANCELLED", a.Value.(*booking.Booking).Status)
+		}
+		require.Equal(t, 1, performed, "exactly one cancel may do the work")
+		require.Equal(t, 7, converged)
 
 		var events int
 		require.NoError(t, pg.Pool.QueryRow(ctx,
 			`SELECT count(*) FROM booking_events WHERE booking_id = $1 AND to_status = 'CANCELLED'`,
 			b.ID).Scan(&events))
-		require.Equal(t, 1, events, "only the winning cancel may append an event")
+		require.Equal(t, 1, events, "only the cancel that matched the row may append an event")
 	})
 
 	t.Run("shared decrements exactly once", func(t *testing.T) {
@@ -231,15 +294,23 @@ func TestCancel_ConcurrentDoubleCancel(t *testing.T) {
 		out := testutil.Race(t, 8, func(ctx context.Context, i int) (any, error) {
 			return svc.Cancel(ctx, drop.ID, testutil.StudentID(1), "")
 		})
-		require.Len(t, out.Successes(), 1)
-		require.Equal(t, 7, out.CountIs(booking.ErrNotCancellable))
+		require.Len(t, out.Failures(), 0)
+
+		var performed int
+		for _, a := range out.Attempts {
+			if !a.Value.(*booking.Booking).Converged {
+				performed++
+			}
+		}
+		require.Equal(t, 1, performed, "exactly one cancel may do the work")
 
 		var booked int
 		require.NoError(t, pg.Pool.QueryRow(ctx,
 			`SELECT booked FROM slot_capacity WHERE facility_id = $1 AND slot_start = $2`,
 			gym, start.UTC()).Scan(&booked))
 		require.Equal(t, 1, booked,
-			"the losing cancels must not each decrement the counter")
+			"the converged cancels must not each decrement the counter — the status "+
+				"guard is what makes the release fire exactly once")
 	})
 }
 

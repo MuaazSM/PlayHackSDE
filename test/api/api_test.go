@@ -220,12 +220,77 @@ func TestHTTP_CancelNotOwner_403(t *testing.T) {
 		method: http.MethodDelete, path: "/api/v1/bookings/" + b.ID.String(), token: owner,
 	}).status)
 
-	// A second cancel is a 409, not a silent success.
+	// A retried cancel converges: non-negotiable #5 says a retry returns the
+	// original result, and a DELETE whose 200 was lost in transit is exactly
+	// that. A 409 here would be a scary error for an action that succeeded.
 	repeat := a.do(t, request{
 		method: http.MethodDelete, path: "/api/v1/bookings/" + b.ID.String(), token: owner,
 	})
-	require.Equal(t, http.StatusConflict, repeat.status)
-	require.Equal(t, httpx.CodeNotCancellable, repeat.errorBody(t).Error)
+	require.Equal(t, http.StatusOK, repeat.status,
+		"a retried cancel must return the original result: %s", repeat.raw)
+
+	var repeatBody struct {
+		ID     uuid.UUID `json:"id"`
+		Status string    `json:"status"`
+	}
+	repeat.decode(t, &repeatBody)
+	require.Equal(t, b.ID, repeatBody.ID)
+	require.Equal(t, "CANCELLED", repeatBody.Status)
+
+	// Side effects still ran exactly once.
+	var events int
+	require.NoError(t, a.pg.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM booking_events WHERE booking_id = $1 AND to_status = 'CANCELLED'`,
+		b.ID).Scan(&events))
+	require.Equal(t, 1, events)
+}
+
+// TestHTTP_CancelRetryIsIdempotent is the lost-response scenario end to end: the
+// same DELETE issued repeatedly, as a flaky client would, must be indistinguishable
+// from issuing it once.
+func TestHTTP_CancelRetryIsIdempotent(t *testing.T) {
+	a := newAPI(t)
+	start, _ := testutil.Slot18()
+
+	token := a.login(t, "student01")
+	created := a.createBooking(t, token, testutil.GymID(), start, 60, uuid.NewString())
+	require.Equal(t, http.StatusCreated, created.status)
+
+	var b struct {
+		ID uuid.UUID `json:"id"`
+	}
+	created.decode(t, &b)
+
+	var booked int
+	require.NoError(t, a.pg.Pool.QueryRow(context.Background(),
+		`SELECT booked FROM slot_capacity WHERE facility_id = $1 AND slot_start = $2`,
+		testutil.GymID(), start.UTC()).Scan(&booked))
+	require.Equal(t, 1, booked)
+
+	for i := 0; i < 5; i++ {
+		resp := a.do(t, request{
+			method: http.MethodDelete,
+			path:   "/api/v1/bookings/" + b.ID.String(),
+			token:  token,
+		})
+		require.Equalf(t, http.StatusOK, resp.status, "retry %d returned %s", i, resp.raw)
+	}
+
+	// The place was returned once, not five times.
+	require.NoError(t, a.pg.Pool.QueryRow(context.Background(),
+		`SELECT booked FROM slot_capacity WHERE facility_id = $1 AND slot_start = $2`,
+		testutil.GymID(), start.UTC()).Scan(&booked))
+	require.Equal(t, 0, booked, "the capacity release must fire exactly once across retries")
+
+	var events, outboxRows int
+	require.NoError(t, a.pg.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM booking_events WHERE booking_id = $1 AND to_status = 'CANCELLED'`,
+		b.ID).Scan(&events))
+	require.Equal(t, 1, events)
+
+	require.NoError(t, a.pg.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM outbox WHERE topic = 'booking.cancelled'`).Scan(&outboxRows))
+	require.Equal(t, 1, outboxRows)
 }
 
 func TestHTTP_ListMineAndFacilities(t *testing.T) {
