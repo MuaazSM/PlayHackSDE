@@ -3,19 +3,21 @@ package concurrency_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
 	"github.com/iitg-playhack/sportsbook/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
-// writeQueueDepth mirrors WRITE_QUEUE_DEPTH from §2.2, roughly 2.5x the
-// PgBouncer backend pool.
-const writeQueueDepth = 64
+// writeQueueDepth tracks the configured default rather than restating it, so the
+// measurement always reports the depth actually shipping.
+const writeQueueDepth = config.DefaultWriteQueueDepth
 
 // classify buckets an attempt by the status the HTTP layer will return.
 func classify(a testutil.Attempt) string {
@@ -108,7 +110,7 @@ func TestShedder_LatencySplit(t *testing.T) {
 		})
 		return b, err
 	})
-	shedBuckets := report(t, "shedder depth=64", shed)
+	shedBuckets := report(t, fmt.Sprintf("shedder depth=%d", writeQueueDepth), shed)
 
 	// The invariant is untouched by admission control.
 	var dbCount int

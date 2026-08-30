@@ -12,6 +12,27 @@ import (
 	"time"
 )
 
+// DefaultWriteQueueDepth bounds concurrent booking writes (WRITE_QUEUE_DEPTH).
+//
+// This is a TUNED value, not a constant of nature. It trades how many users get
+// a definitive answer against how fast that answer arrives: every admitted
+// request serialises behind the per-facility advisory lock, so conflict latency
+// grows roughly linearly with depth while shed requests stay free.
+//
+// Measured by TestDepthSweep_Diagnostic at n=500 on one contended slot:
+//
+//	depth   admitted   shed   409 p99    429 p99
+//	   16         16    484     10ms       333ns
+//	  128        128    372     54ms       292ns
+//	  300        300    200    121ms       292ns
+//	  500        500      0    195ms          —
+//
+// 128 gives roughly 3x headroom against the p99 < 150ms rejection target while
+// cutting shedding from 87% to ~74%. Re-run the sweep on the demo hardware
+// during M5 rehearsal and pin the largest depth that clears 150ms with ~25%
+// margin.
+const DefaultWriteQueueDepth = 128
+
 // AuthMode selects between real OIDC and the dev login shortcut.
 type AuthMode string
 
@@ -42,6 +63,7 @@ type Config struct {
 	CheckinHMACSecret string
 
 	// Load shedding — §4.6. Losing must be faster than winning.
+	// See DefaultWriteQueueDepth: tuned per environment, not a fixed constant.
 	WriteQueueDepth int
 	WriteTimeout    time.Duration
 
@@ -78,7 +100,7 @@ func Load() (*Config, error) {
 	if c.DBMaxConns, err = envInt32("DB_MAX_CONNS", 25); err != nil {
 		return nil, err
 	}
-	if c.WriteQueueDepth, err = envInt("WRITE_QUEUE_DEPTH", 64); err != nil {
+	if c.WriteQueueDepth, err = envInt("WRITE_QUEUE_DEPTH", DefaultWriteQueueDepth); err != nil {
 		return nil, err
 	}
 	if c.WriteTimeout, err = envMillis("WRITE_TIMEOUT_MS", 800); err != nil {

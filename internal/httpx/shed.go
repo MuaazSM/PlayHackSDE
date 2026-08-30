@@ -55,8 +55,12 @@ func NewShedder(depth int, timeout time.Duration) *Shedder {
 // A non-blocking send with a default branch is what makes a shed O(1) instead of
 // "wait and then find out".
 //
-// fn receives a context that may carry the write timeout; it must be used rather
-// than the caller's, or the bound is decorative.
+// Deviation from the §4.6 sketch, noted so the mismatch does not later read as
+// drift: the sketch takes fn func() error, this takes fn func(context.Context)
+// error. WRITE_TIMEOUT_MS has to reach the work to bound anything, and a timeout
+// the callee cannot observe is decorative.
+//
+// fn must use the context it is given rather than the caller's.
 func (s *Shedder) Do(ctx context.Context, fn func(context.Context) error) error {
 	select {
 	case s.slots <- struct{}{}:
@@ -100,6 +104,12 @@ const (
 )
 
 // RetryAfter returns a jittered Retry-After value for a shed response.
+//
+// PHASE 5 HANDLER CHECKLIST: every 429 emitted for booking.ErrShed MUST carry a
+// Retry-After header sourced from here. A 429 without one tells the client
+// nothing about when to come back, and clients that guess will converge on the
+// same interval — which is the herd arriving again on a timer, the exact thing
+// the jitter exists to prevent.
 //
 // Jitter matters: a fixed hint synchronises every shed client into one retry
 // spike, which is the same herd arriving again on a timer.
