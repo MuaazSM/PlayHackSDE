@@ -75,10 +75,13 @@ SELECT c.facility_id, c.name, c.sport, c.is_exclusive,
   -- closure is a row-level fact, so the predicate keeps the scan off the thirty
   -- confirmed gym bookings that the counter already accounts for.
   --
-  -- As in the per-facility query, the ORDER BY cannot actually change the
-  -- answer: the exclusion constraint admits one overlapping row per exclusive
-  -- facility, and for a shared one only BLOCKED rows match here and all map to
-  -- 'closed'. Kept as a statement of intent, not as working logic.
+  -- As in the per-facility query, the ORDER BY cannot change the answer today:
+  -- the exclusion constraint admits one overlapping row per exclusive facility,
+  -- and for a shared one only BLOCKED rows match here and all map to 'closed'.
+  --
+  -- Reachable only if no_double_book's predicate NARROWS below the statuses read
+  -- here, or if this filter widens past it. Until then it is a statement of
+  -- intent, not working logic.
   LEFT JOIN LATERAL (
     SELECT b.status
       FROM bookings b

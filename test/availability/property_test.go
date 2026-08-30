@@ -27,6 +27,14 @@ import (
 // compares it to a differently-shaped query over the same rows, so a wrong
 // derivation shows up as a disagreement rather than as two matching wrong
 // answers.
+//
+// COVERAGE IS A PROPERTY OF THE TEST RATHER THAN OF THE SEED. An earlier version
+// of this test was verifying agreement about a state it never reached: the
+// random workload never drove the gym past 24 of its 30 places, so eighteen
+// shared slots were checked and every one of them was free, and a wrong
+// "filling" threshold passed. Two things prevent that recurring — the run
+// asserts that every state actually occurred, and the two boundary states are
+// planted deterministically rather than waited for.
 func TestAvailabilityMatchesBookings(t *testing.T) {
 	const operations = 200
 

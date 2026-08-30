@@ -37,11 +37,19 @@ SELECT g.slot_start,
   -- LATERAL + LIMIT 1 so a slot resolves to one state instead of duplicating.
   --
   -- The ORDER BY is defensive, not load-bearing, and it is worth being honest
-  -- about which: no_double_book already guarantees that at most ONE row among
-  -- CONFIRMED/HELD/BLOCKED overlaps any instant on an exclusive facility, so
-  -- there is never a second row to outrank. It stays because it costs nothing
-  -- and states the intended precedence if that predicate is ever widened —
-  -- a closure outranks a booking, which outranks a hold.
+  -- about which. This query's filter is exactly no_double_book's predicate, and
+  -- that constraint admits at most ONE overlapping row among the statuses it
+  -- covers — so there is never a second row to outrank and the ordering cannot
+  -- change the answer.
+  --
+  -- IT BECOMES LOAD-BEARING IF THE CONSTRAINT STOPS COVERING EVERY STATUS THIS
+  -- QUERY READS: either no_double_book's predicate NARROWS (drop 'HELD' from it
+  -- and a hold could then overlap a confirmed booking) or this filter widens
+  -- past it. Widening the constraint is harmless — it covers more rows and still
+  -- admits one overlap.
+  --
+  -- Kept because it costs nothing and states the precedence a user cares about
+  -- for that day: a closure outranks a booking, which outranks a hold.
   LEFT JOIN LATERAL (
     SELECT b.status
       FROM bookings b
