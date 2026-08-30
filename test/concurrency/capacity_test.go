@@ -327,69 +327,168 @@ func TestExclusiveIgnoresCapacityTable(t *testing.T) {
 	require.Equal(t, 0, rows, "an exclusive booking must create no capacity rows")
 }
 
-// TestConcurrentTakeAndRelease interleaves bookings and cancellations on one
-// slot and checks the counter never drifts or goes negative.
+// TestConcurrentTakeAndRelease runs 100 takes interleaved with 100 releases on
+// one counter row, and checks 0 <= booked <= capacity holds THROUGHOUT — not
+// merely at the end, where a counter that had briefly gone negative and come
+// back would look perfectly healthy.
+//
+// The invariant is proved two ways, and the first is the real one:
+//
+//   - Continuously, by the database. slot_capacity carries CHECK (booked >= 0)
+//     and CHECK (booked <= capacity), so any statement that would take the
+//     counter out of range fails outright. An excursion cannot happen and then
+//     be tidied away; it would surface here as an unclassified error, which the
+//     assertions below reject.
+//   - By sampling, while the race is in flight, as corroborating evidence that
+//     the window really was contended rather than accidentally serialised.
+//
+// Note that Release is the raw capacity primitive: it returns a place without
+// cancelling a booking row, because Phase 4's cancel will do both in one
+// transaction. So the counter and the confirmed-row count legitimately diverge
+// here, and this test does not assert they agree.
 func TestConcurrentTakeAndRelease(t *testing.T) {
-	const n = 100
+	const (
+		takes    = 100
+		releases = 100
+		n        = takes + releases
+	)
 
 	pg := testutil.Postgres(t)
 	gym := testutil.GymID()
 	start, end := testutil.Slot18()
 
-	users := pg.Users(t, n)
+	users := pg.Users(t, takes)
 	cat := testutil.Catalogue(t, pg)
 	testutil.WarmCatalogue(t, cat, gym)
 	svc := pg.BookingServiceWith(t, cat)
 	pg.Warm(t, 20)
 
-	var takes, fulls, releases atomic.Int64
+	// Pre-fill the slot so releases have something real to give back and the two
+	// operations genuinely contend, rather than the releases all no-opping on an
+	// empty counter.
+	seed := pg.Users(t, gymCapacity)
+	for i := 0; i < gymCapacity; i++ {
+		_, err := svc.Create(context.Background(), booking.CreateRequest{
+			FacilityID: gym, UserID: seed[i], Start: start,
+			Duration: time.Hour, IdemKey: uuid.NewString(),
+		})
+		require.NoError(t, err)
+	}
+	booked, _, _ := counterFor(t, pg, gym, start)
+	require.Equal(t, gymCapacity, booked)
+
+	// Sample the counter while the race runs.
+	var (
+		samples    atomic.Int64
+		violations atomic.Int64
+		minSeen    atomic.Int64
+		maxSeen    atomic.Int64
+	)
+	minSeen.Store(int64(booked))
+	maxSeen.Store(int64(booked))
+
+	stopSampling := make(chan struct{})
+	samplingDone := make(chan struct{})
+	go func() {
+		defer close(samplingDone)
+		for {
+			select {
+			case <-stopSampling:
+				return
+			default:
+			}
+
+			var b, c int
+			err := pg.Pool.QueryRow(context.Background(),
+				`SELECT booked, capacity FROM slot_capacity WHERE facility_id = $1 AND slot_start = $2`,
+				gym, start.UTC()).Scan(&b, &c)
+			if err == nil {
+				samples.Add(1)
+				if b < 0 || b > c {
+					violations.Add(1)
+				}
+				for {
+					old := minSeen.Load()
+					if int64(b) >= old || minSeen.CompareAndSwap(old, int64(b)) {
+						break
+					}
+				}
+				for {
+					old := maxSeen.Load()
+					if int64(b) <= old || maxSeen.CompareAndSwap(old, int64(b)) {
+						break
+					}
+				}
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
 
 	out := testutil.Race(t, n, func(ctx context.Context, i int) (any, error) {
-		// Every third goroutine releases instead of booking, so takes and
-		// releases interleave on the same counter row.
-		if i%3 == 2 {
-			releases.Add(1)
+		// Even indices take, odd indices release: 100 of each, interleaved on
+		// the same counter row.
+		if i%2 == 1 {
 			_, err := svc.Release(ctx, gym, start, end)
-			return nil, err
+			return "release", err
 		}
 
 		_, err := svc.Create(ctx, booking.CreateRequest{
-			FacilityID: gym, UserID: users[i], Start: start,
+			FacilityID: gym, UserID: users[i/2], Start: start,
 			Duration: time.Hour, IdemKey: uuid.NewString(),
 		})
-		switch {
-		case err == nil:
-			takes.Add(1)
-		case errors.Is(err, booking.ErrCapacityFull):
-			fulls.Add(1)
-		}
-		return nil, err
+		return "take", err
 	})
 
-	for _, a := range out.Failures() {
-		require.ErrorIsf(t, a.Err, booking.ErrCapacityFull,
-			"attempt %d failed with something other than a full slot: %v", a.Index, a.Err)
+	close(stopSampling)
+	<-samplingDone
+
+	// Releases never fail. Takes either succeed or find the slot full; anything
+	// else — including a CHECK violation from an out-of-range counter — is a
+	// defect.
+	var tookOK, tookFull, releasedOK int
+	for _, a := range out.Attempts {
+		kind, _ := a.Value.(string)
+		switch {
+		case a.Err == nil && kind == "release":
+			releasedOK++
+		case a.Err == nil:
+			tookOK++
+		case errors.Is(a.Err, booking.ErrCapacityFull) && kind == "take":
+			tookFull++
+		default:
+			t.Fatalf("attempt %d (%s) failed with an unclassified error, which is how a "+
+				"CHECK violation on the counter would present: %v", a.Index, kind, a.Err)
+		}
 	}
+	require.Equal(t, releases, releasedOK, "a release must never fail")
+	require.Equal(t, takes, tookOK+tookFull, "every take is a confirmation or a full slot")
 
-	booked, capacity, _ := counterFor(t, pg, gym, start)
+	finalBooked, finalCapacity, _ := counterFor(t, pg, gym, start)
 
-	var confirmed int
+	t.Logf("takes=%d (ok=%d full=%d) releases=%d (ok=%d) final_booked=%d capacity=%d",
+		takes, tookOK, tookFull, releases, releasedOK, finalBooked, finalCapacity)
+	t.Logf("sampled=%d violations=%d observed_range=[%d,%d] %s",
+		samples.Load(), violations.Load(), minSeen.Load(), maxSeen.Load(), out.Summarise())
+
+	require.Zero(t, violations.Load(),
+		"sampled the counter %d times and saw %d readings outside [0,%d]",
+		samples.Load(), violations.Load(), finalCapacity)
+
+	require.GreaterOrEqual(t, finalBooked, 0)
+	require.LessOrEqual(t, finalBooked, finalCapacity)
+	require.GreaterOrEqual(t, minSeen.Load(), int64(0), "the counter went negative mid-race")
+	require.LessOrEqual(t, maxSeen.Load(), int64(finalCapacity), "the counter exceeded capacity mid-race")
+
+	// The database's own guarantee, restated: no row anywhere is out of range.
+	var bad int
 	require.NoError(t, pg.Pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM bookings WHERE facility_id = $1 AND status = 'CONFIRMED'`,
-		gym).Scan(&confirmed))
+		`SELECT count(*) FROM slot_capacity WHERE booked < 0 OR booked > capacity`).Scan(&bad))
+	require.Equal(t, 0, bad, "the CHECK constraints must hold throughout")
 
-	t.Logf("takes=%d fulls=%d releases=%d booked=%d confirmed_rows=%d",
-		takes.Load(), fulls.Load(), releases.Load(), booked, confirmed)
-
-	require.GreaterOrEqual(t, booked, 0, "the counter must never go negative")
-	require.LessOrEqual(t, booked, capacity, "the counter must never exceed capacity")
-	require.LessOrEqual(t, int(takes.Load()), gymCapacity+int(releases.Load()),
-		"more bookings succeeded than takes plus releases could allow")
-
-	var negatives int
-	require.NoError(t, pg.Pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM slot_capacity WHERE booked < 0 OR booked > capacity`).Scan(&negatives))
-	require.Equal(t, 0, negatives, "the CHECK constraints must hold throughout")
+	// The race must have actually interleaved: with 100 releases against a slot
+	// pre-filled to capacity, the counter has to have dropped below its start.
+	require.Less(t, minSeen.Load(), int64(gymCapacity),
+		"no release was observed taking effect; takes and releases did not interleave")
 }
 
 // TestSharedCapacity_ConcurrentMultiSlot contends on overlapping slot SETS, not
