@@ -1,0 +1,109 @@
+# PlayHack local stack — IMPLEMENTATION.md §2.1
+#
+# Nothing here needs the internet at demo time. Venue wifi must not be able to
+# break the race demo.
+#
+# Phase 15 (M3/M5) uncomments postgres-replica, prometheus and grafana below.
+
+name: playhack
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: playhack-postgres
+    environment:
+      POSTGRES_USER: playhack
+      POSTGRES_PASSWORD: playhack
+      POSTGRES_DB: playhack
+      # PgBouncer holds the plaintext password in userlist.txt and speaks md5 to
+      # clients; md5 here keeps that path simple for the dev stack.
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
+    command:
+      - postgres
+      - -c
+      - password_encryption=md5
+      - -c
+      - max_connections=200
+    ports:
+      # Host port is overridable: a locally-installed PostgreSQL binds
+      # 127.0.0.1:5432 first and silently wins over Docker's wildcard bind.
+      # Export POSTGRES_HOST_PORT=55432 (and friends) if you have one.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U playhack -d playhack"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2
+    container_name: playhack-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PGBOUNCER_HOST_PORT:-6432}:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: playhack-redis
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # --- Phase 15 stubs. Uncomment when M3/M5 land; do not let these block M0. ---
+  #
+  # postgres-replica:
+  #   image: postgres:16-alpine
+  #   container_name: playhack-postgres-replica
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   environment:
+  #     PGUSER: replicator
+  #     PGPASSWORD: replicator
+  #   ports:
+  #     - "${REPLICA_HOST_PORT:-5433}:5432"
+  #   volumes:
+  #     - pgdata_replica:/var/lib/postgresql/data
+  #   # Streaming replica: pg_basebackup from the primary, then start read-only.
+  #   # Availability reads point at DB_REPLICA_URL, which falls back to DB_URL.
+  #
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: playhack-prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: playhack-grafana
+  #   depends_on: [prometheus]
+  #   environment:
+  #     GF_SECURITY_ADMIN_PASSWORD: playhack
+  #     GF_AUTH_ANONYMOUS_ENABLED: "true"
+  #   ports:
+  #     - "3001:3000"
+  #   volumes:
+  #     - ./grafana:/etc/grafana/provisioning:ro
+
+volumes:
+  pgdata:
+  # pgdata_replica:
