@@ -206,6 +206,22 @@ func NewRouter(d RouterDeps) http.Handler {
 				Get("/facilities/{id}/checkin-token", checkinHandlers.FacilityToken)
 			r.Post("/bookings/{id}/check-in", checkinHandlers.CheckIn)
 
+			// Manager closures (§10.4). MANAGER-only, all three: the list is the
+			// console's board and it names the students a closure affects, which
+			// is not a student's business.
+			//
+			// Not shed. A closure is a rare administrative write, and the queue
+			// bound exists to protect the 6 PM booking rush from itself — turning
+			// a manager away from closing a flooded court because students are
+			// busy booking it would be exactly backwards.
+			r.Route("/closures", func(r chi.Router) {
+				r.Use(RequireRole(RoleManager))
+
+				r.With(RequireIdempotencyKey).Post("/", h.CreateClosure)
+				r.Get("/", h.ListClosures)
+				r.Delete("/{id}", h.ReopenClosure)
+			})
+
 			// The race console (§13). Registered ONLY in dev mode, the same
 			// rule POST /api/v1/dev/login follows and for the same reason:
 			// /demo/reset cancels whatever is standing in the demo slot, which

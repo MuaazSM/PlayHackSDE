@@ -45,6 +45,17 @@ const (
 	BookingMarkNoShow       = "booking_mark_no_show"
 	BookingCompleteAttended = "booking_complete_attended"
 
+	// Manager closures (§10.4). A closure is a booking row, so these sit beside
+	// the booking queries rather than in a namespace of their own.
+	ClosureInsert          = "closure_insert"
+	ClosureFind            = "closure_find"
+	ClosureGet             = "closure_get"
+	ClosureList            = "closure_list"
+	ClosureAffected        = "closure_affected"
+	ClosureReopen          = "closure_reopen"
+	ClosureZeroCapacity    = "closure_zero_capacity"
+	ClosureRestoreCapacity = "closure_restore_capacity"
+
 	WaitlistHeadForUpdate = "waitlist_head_for_update"
 	WaitlistClaimHead     = "waitlist_claim_head"
 	WaitlistJoin          = "waitlist_join"
@@ -94,6 +105,14 @@ var required = []string{
 	CheckinGet,
 	BookingMarkNoShow,
 	BookingCompleteAttended,
+	ClosureInsert,
+	ClosureFind,
+	ClosureGet,
+	ClosureList,
+	ClosureAffected,
+	ClosureReopen,
+	ClosureZeroCapacity,
+	ClosureRestoreCapacity,
 	WaitlistHeadForUpdate,
 	WaitlistClaimHead,
 	WaitlistJoin,

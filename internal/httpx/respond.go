@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -52,17 +53,37 @@ type Alternative struct {
 	Start      string `json:"start"`
 }
 
+// ConflictingBooking is a booking that stands in the way of a manager's closure.
+//
+// Only ever present on a 409 from POST /api/v1/closures. It carries the roll
+// number and the name because the manager's next action is to contact these
+// students; an id alone would send them back to the database to find out who
+// they are.
+type ConflictingBooking struct {
+	BookingID string    `json:"booking_id"`
+	RollNo    string    `json:"roll_no"`
+	Name      string    `json:"name"`
+	Start     time.Time `json:"start"`
+	End       time.Time `json:"end"`
+}
+
 // ErrorBody is the ONE error envelope, per IMPLEMENTATION.md §10.3.
 //
 // Every non-2xx response in this service has this shape. No handler writes its
 // own error JSON — a client that must special-case the shape of a failure by
 // endpoint cannot handle failures generically, which is exactly when it matters.
+//
+// The optional members follow one rule: they are ABSENT where meaningless, never
+// present and empty, so a client tests presence rather than emptiness.
+// alternatives and waitlist_available answer a student's lost race; conflicts
+// answers a manager's refused closure. All three are the same envelope.
 type ErrorBody struct {
-	Error             string        `json:"error"`
-	Message           string        `json:"message"`
-	Alternatives      []Alternative `json:"alternatives,omitempty"`
-	WaitlistAvailable *bool         `json:"waitlist_available,omitempty"`
-	RequestID         string        `json:"request_id"`
+	Error             string               `json:"error"`
+	Message           string               `json:"message"`
+	Alternatives      []Alternative        `json:"alternatives,omitempty"`
+	WaitlistAvailable *bool                `json:"waitlist_available,omitempty"`
+	Conflicts         []ConflictingBooking `json:"conflicts,omitempty"`
+	RequestID         string               `json:"request_id"`
 }
 
 // JSON writes a success body.
@@ -112,6 +133,15 @@ func Error(w http.ResponseWriter, r *http.Request, err error) {
 		body.WaitlistAvailable = &conflict.WaitlistAvailable
 	}
 
+	// A closure refused because bookings already occupy the window. Same 409, and
+	// deliberately NOT carrying alternatives: a manager is not shopping for
+	// another court, they are deciding what to do about four students.
+	var closureConflict *booking.ClosureConflict
+	if errors.As(err, &closureConflict) {
+		body.Message = closureConflictMessage(closureConflict)
+		body.Conflicts = renderConflicts(closureConflict.Bookings)
+	}
+
 	JSON(w, status, body)
 }
 
@@ -126,6 +156,34 @@ func conflictMessage(c *booking.Conflict, code, fallback string) string {
 		return c.FacilityName + " is full for that time."
 	}
 	return c.FacilityName + " was booked moments ago."
+}
+
+// closureConflictMessage says how many bookings are in the way, because that is
+// the number that decides what the manager does next.
+func closureConflictMessage(c *booking.ClosureConflict) string {
+	if len(c.Bookings) == 1 {
+		return c.FacilityName + " has 1 booking inside that window. Cancel it first, or pick another time."
+	}
+	return fmt.Sprintf("%s has %d bookings inside that window. Cancel them first, or pick another time.",
+		c.FacilityName, len(c.Bookings))
+}
+
+// renderConflicts converts the blocking bookings to the wire shape.
+func renderConflicts(rows []booking.AffectedBooking) []ConflictingBooking {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]ConflictingBooking, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, ConflictingBooking{
+			BookingID: b.ID.String(),
+			RollNo:    b.RollNo,
+			Name:      b.Name,
+			Start:     b.Start,
+			End:       b.End,
+		})
+	}
+	return out
 }
 
 // renderAlternatives converts domain suggestions to the wire shape, localising
