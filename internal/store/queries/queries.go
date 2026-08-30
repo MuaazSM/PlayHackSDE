@@ -38,6 +38,9 @@ const (
 	WaitlistHeadForUpdate  = "waitlist_head_for_update"
 	FacilityGet            = "facility_get"
 	FacilityList           = "facility_list"
+	AvailabilityFacility   = "availability_facility_day"
+	AvailabilityShared     = "availability_shared_day"
+	AvailabilityCampus     = "availability_campus_day"
 	OutboxInsert           = "outbox_insert"
 )
 
@@ -57,6 +60,9 @@ var required = []string{
 	WaitlistHeadForUpdate,
 	FacilityGet,
 	FacilityList,
+	AvailabilityFacility,
+	AvailabilityShared,
+	AvailabilityCampus,
 	OutboxInsert,
 }
 
