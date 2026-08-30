@@ -20,6 +20,7 @@ const (
 	sqlstateExclusionViolation  = "23P01"
 	sqlstateForeignKeyViolation = "23503"
 	sqlstateCheckViolation      = "23514"
+	sqlstateRestrictViolation   = "23001"
 )
 
 // insertBooking is the raw write. Deliberately a plain INSERT with no preceding
@@ -440,4 +441,51 @@ func seededUserIDs() []uuid.UUID {
 		ids = append(ids, u.ID())
 	}
 	return ids
+}
+
+// TestFacilityExclusivityIsImmutable guards the denormalised copy of
+// is_exclusive on every booking row.
+//
+// The composite FK keeps a NEW booking honest. Nothing kept an OLD one honest:
+// flipping a live facility would silently reinterpret every existing booking's
+// cancel path, sending exclusive bookings down the capacity-counter branch and
+// shared ones into an exclusion constraint they were never in.
+func TestFacilityExclusivityIsImmutable(t *testing.T) {
+	ctx := ctxT(t)
+
+	court := newFacility(t, ctx, "tennis", true, 1)
+	gym := newFacility(t, ctx, "gym", false, 30)
+
+	// Flipping in either direction is refused.
+	_, err := shared.pool.Exec(ctx,
+		`UPDATE facilities SET is_exclusive = false, capacity = 30 WHERE id = $1`, court)
+	requireSQLSTATE(t, err, sqlstateRestrictViolation)
+
+	_, err = shared.pool.Exec(ctx,
+		`UPDATE facilities SET is_exclusive = true, capacity = 1 WHERE id = $1`, gym)
+	requireSQLSTATE(t, err, sqlstateRestrictViolation)
+
+	// The rows are unchanged.
+	var courtExclusive, gymExclusive bool
+	require.NoError(t, shared.pool.QueryRow(ctx,
+		`SELECT is_exclusive FROM facilities WHERE id = $1`, court).Scan(&courtExclusive))
+	require.NoError(t, shared.pool.QueryRow(ctx,
+		`SELECT is_exclusive FROM facilities WHERE id = $1`, gym).Scan(&gymExclusive))
+	require.True(t, courtExclusive)
+	require.False(t, gymExclusive)
+
+	// Everything else about a facility stays editable. A gym may grow.
+	_, err = shared.pool.Exec(ctx,
+		`UPDATE facilities SET capacity = 40, closes_at = '23:30' WHERE id = $1`, gym)
+	require.NoError(t, err, "capacity and hours must remain mutable")
+
+	// An update that rewrites is_exclusive to the value it already holds is not
+	// a change, so the idempotent seed keeps working.
+	_, err = shared.pool.Exec(ctx,
+		`UPDATE facilities SET is_exclusive = true, name = name || '' WHERE id = $1`, court)
+	require.NoError(t, err, "a no-op rewrite of the flag must not raise")
+
+	// And deactivating a facility — the closure path — is unaffected.
+	_, err = shared.pool.Exec(ctx, `UPDATE facilities SET is_active = false WHERE id = $1`, court)
+	require.NoError(t, err)
 }
