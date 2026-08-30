@@ -42,6 +42,11 @@ type Booking struct {
 	// instead of 201 for these.
 	Replayed bool
 
+	// Converged is true when a cancel found the booking already cancelled and
+	// returned it unchanged rather than doing the work again. The caller's
+	// intent was already satisfied; no side effect ran on this path.
+	Converged bool
+
 	// isExclusive mirrors the row's denormalised flag, so cancel knows whether
 	// to release a capacity counter without a second catalogue lookup.
 	isExclusive bool

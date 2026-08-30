@@ -16,6 +16,13 @@ import (
 // roleManager may act on any booking, not only their own.
 const roleManager = "MANAGER"
 
+// statusCancelled is the terminal state a cancel converges on.
+const statusCancelled = "CANCELLED"
+
+// errNoRowsCancelled is internal: the guarded UPDATE matched nothing. It never
+// escapes Cancel, which resolves it into convergence or ErrNotCancellable.
+var errNoRowsCancelled = errors.New("cancel matched no rows")
+
 // Cancel releases a booking. IMPLEMENTATION.md §6.1.
 //
 // One transaction: authorise, cancel under a status guard, release shared
@@ -67,6 +74,39 @@ func (s *Service) Cancel(ctx context.Context, bookingID, actorID uuid.UUID, reas
 		// The guarded UPDATE is the concurrency control. Two simultaneous
 		// cancels both run it; exactly one matches a row.
 		row, fromStatus, err := cancelGuarded(ctx, tx, bookingID)
+		if errors.Is(err, errNoRowsCancelled) {
+			// This call did not perform the cancellation. That is not
+			// automatically a failure — non-negotiable #5 requires a retry to
+			// return the original result, and a cancel whose 200 was lost in
+			// transit is exactly that case. Telling the student "that booking is
+			// no longer active" for an action that succeeded is a scary error
+			// for a correct outcome.
+			//
+			// So converge on state instead: if the booking is already
+			// CANCELLED, the caller's intent is satisfied and the truthful
+			// answer is the cancelled booking. Any other terminal state
+			// (COMPLETED, NO_SHOW) genuinely is a conflict.
+			//
+			// The status is RE-READ rather than taken from the load above. By
+			// the time the UPDATE matches zero rows the winner has committed —
+			// had it still been open, the UPDATE would have blocked on its row
+			// lock instead — so the load is stale by construction here.
+			current, loadErr := loadBooking(ctx, tx, bookingID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if current.Status != statusCancelled {
+				return fmt.Errorf("%w: booking is %s", ErrNotCancellable, current.Status)
+			}
+
+			// Converged. NO SIDE EFFECTS on this path: the capacity release, the
+			// event and the outbox row belong to the call that matched the row,
+			// and repeating them here would return a place twice and append a
+			// duplicate event.
+			cancelled = *current
+			cancelled.Converged = true
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -175,7 +215,11 @@ func cancelGuarded(ctx context.Context, q store.Querier, bookingID uuid.UUID) (c
 		&row.start, &row.end, &row.createdAt, &fromStatus,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return row, "", fmt.Errorf("%w: booking is not cancellable", ErrNotCancellable)
+		// Deliberately NOT ErrNotCancellable. Zero rows means only "this call
+		// did not perform the cancellation"; whether that is a conflict or a
+		// satisfied retry depends on the booking's current status, which the
+		// caller checks.
+		return row, "", errNoRowsCancelled
 	}
 	if err != nil {
 		return row, "", store.Classify(err)
