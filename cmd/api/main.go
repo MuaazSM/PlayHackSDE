@@ -18,6 +18,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
 	"github.com/iitg-playhack/sportsbook/internal/live"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
+	"github.com/iitg-playhack/sportsbook/internal/policy"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 	"github.com/lmittmann/tint"
@@ -83,9 +84,14 @@ func run(log *slog.Logger) error {
 	// SKIP LOCKED statement and cannot promote the same student (§6.2).
 	waiting := waitlist.NewService(db, facilities, cfg.PromotionTTL, log)
 
+	// Fair-use caps (§11), read from the `policies` table inside the booking
+	// transaction. Advisory under perfect simultaneity and documented as such
+	// (§4.7) — the exclusion constraint is what decides the race, and nothing
+	// about that changes whether this is wired or not.
 	bookings := booking.NewService(db, facilities, loc).
 		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay)).
-		WithPromotion(waiting)
+		WithPromotion(waiting).
+		WithPolicy(policy.Check)
 
 	// Check-in and automatic release (§7). It takes the SAME waitlist service the
 	// cancel path does, which is the entire economy of this feature: a released

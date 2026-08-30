@@ -14,6 +14,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/booking"
 	"github.com/iitg-playhack/sportsbook/internal/checkin"
 	"github.com/iitg-playhack/sportsbook/internal/demo"
+	"github.com/iitg-playhack/sportsbook/internal/policy"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 )
 
@@ -83,7 +84,15 @@ type ErrorBody struct {
 	Alternatives      []Alternative        `json:"alternatives,omitempty"`
 	WaitlistAvailable *bool                `json:"waitlist_available,omitempty"`
 	Conflicts         []ConflictingBooking `json:"conflicts,omitempty"`
-	RequestID         string               `json:"request_id"`
+
+	// Limit and ResetsAt are present only on a 422 POLICY_LIMIT (§11). A cap
+	// without a name is unactionable — the student cannot tell whether to cancel
+	// something, wait, or stop trying — and a name without a reset instant tells
+	// them to wait without saying how long.
+	Limit    string     `json:"limit,omitempty"`
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
+
+	RequestID string `json:"request_id"`
 }
 
 // JSON writes a success body.
@@ -136,6 +145,16 @@ func Error(w http.ResponseWriter, r *http.Request, err error) {
 	// A closure refused because bookings already occupy the window. Same 409, and
 	// deliberately NOT carrying alternatives: a manager is not shopping for
 	// another court, they are deciding what to do about four students.
+	// A fair-use refusal names the cap it hit and when that cap next admits a
+	// booking. Advisory or not (§4.7), the student on the other end still needs
+	// to know what to do next.
+	var limit *policy.LimitError
+	if errors.As(err, &limit) {
+		body.Limit = limit.Limit
+		resets := limit.ResetsAt.UTC()
+		body.ResetsAt = &resets
+	}
+
 	var closureConflict *booking.ClosureConflict
 	if errors.As(err, &closureConflict) {
 		body.Message = closureConflictMessage(closureConflict)

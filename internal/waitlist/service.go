@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
+	"github.com/iitg-playhack/sportsbook/internal/policy"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
@@ -173,12 +174,22 @@ func (s *Service) Join(ctx context.Context, userID, facilityID uuid.UUID, start,
 		Status:     "WAITING",
 	}
 
-	// Priority tiers land with internal/policy; everyone queues in the default
-	// tier for now and FIFO within it does the ordering.
-	const defaultPriority = 0
+	// Priority tier, less any recent no-show penalty (§11). Stamped once, at
+	// join time, rather than derived on every read of the queue: a student's
+	// place must not silently move because something changed while they were
+	// waiting, and waitlist_claim_head's ORDER BY has to be servable from
+	// idx_waitlist_head rather than from a subquery per row.
+	//
+	// A failure here is a failure to join. The alternative — quietly defaulting
+	// to 0 — would put an institute team at the back of the queue without
+	// anybody being told, which is worse than an error the student can retry.
+	priority, err := policy.Priority(ctx, s.db.Primary, userID)
+	if err != nil {
+		return nil, fmt.Errorf("waitlist: join: %w", err)
+	}
 
 	err = s.db.Primary.QueryRow(ctx, queries.Get(queries.WaitlistJoin),
-		facilityID, userID, entry.Start, entry.End, defaultPriority,
+		facilityID, userID, entry.Start, entry.End, priority,
 	).Scan(&entry.ID, &entry.Position, &entry.Priority, &entry.CreatedAt)
 	if err != nil {
 		classified := store.Classify(err)

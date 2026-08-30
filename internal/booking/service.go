@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
+	"github.com/iitg-playhack/sportsbook/internal/policy"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
@@ -89,6 +90,44 @@ type Service struct {
 	// transaction (§6.2). Optional: nil means a cancel is a plain cancel, which
 	// is exactly what it was before M4. See WithPromotion.
 	promoter Promoter
+
+	// policy is the fair-use gate, step 4 of §4.1. Optional: nil means no caps,
+	// which is what the write path did before M-P2 and what most tests want.
+	// See WithPolicy.
+	policy policy.CheckFunc
+}
+
+// WithPolicy attaches fair-use caps to the write path (§11).
+//
+// Optional, and off unless wired: a deployment with no caps is a correct
+// deployment that just does not ration. Nothing about slot uniqueness moves with
+// this — the exclusion constraint decides the race either way — which is exactly
+// why it can be a switch at all. Contrast the advisory lock in exclusive.go,
+// which is not optional and is not correctness either.
+func (s *Service) WithPolicy(check policy.CheckFunc) *Service {
+	s.policy = check
+	return s
+}
+
+// checkPolicy runs the fair-use gate as the first thing INSIDE the transaction
+// that will do the insert (§4.1 step 4).
+//
+// The read it performs is of the caller's own bookings, never of slot occupancy
+// — see policy_usage.sql. It is advisory under simultaneity by design (§4.7).
+func (s *Service) checkPolicy(ctx context.Context, tx pgx.Tx, req CreateRequest, facilityID uuid.UUID, start, end time.Time) error {
+	if s.policy == nil {
+		return nil
+	}
+	err := s.policy(ctx, tx, req.UserID, facilityID, policy.Window{Start: start, End: end})
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, policy.ErrPolicyExceeded) {
+		// Translated into this package's vocabulary, with the typed detail still
+		// reachable by errors.As so the 422 can name the limit and its reset.
+		return &policyError{cause: err}
+	}
+	return err
 }
 
 // NewService wires the write path. loc is the campus timezone, used only to
@@ -235,6 +274,12 @@ func (s *Service) attemptShared(ctx context.Context, f *facility.Facility, req C
 
 	var created Booking
 	txErr := store.WithTx(ctx, s.db.Primary, func(tx pgx.Tx) error {
+		// §4.1 step 4. Before any capacity is claimed, so a refused booking
+		// leaves no counter incremented even for the instant before rollback.
+		if err := s.checkPolicy(ctx, tx, req, f.ID, start, end); err != nil {
+			return err
+		}
+
 		// One capacity_take per slot, in ascending slot_start order. Consistent
 		// ordering across all callers is what keeps the multi-slot path
 		// deadlock-free: two transactions claiming the same rows in opposite
@@ -294,6 +339,12 @@ func (s *Service) attemptShared(ctx context.Context, f *facility.Facility, req C
 	case errors.Is(txErr, ErrCapacityFull):
 		return nil, txErr
 
+	// A fair-use refusal is already in this package's vocabulary and already
+	// carries the sentence the student will read. Wrapping it again would put
+	// "booking: create:" in front of a 422 message.
+	case errors.Is(txErr, ErrPolicyExceeded):
+		return nil, txErr
+
 	case errors.Is(txErr, store.ErrDeadlock):
 		return nil, txErr
 
@@ -349,6 +400,14 @@ func (s *Service) attemptExclusive(ctx context.Context, f *facility.Facility, re
 			return store.Classify(err)
 		}
 
+		// §4.1 step 4, after the lock because the lock must stay the FIRST
+		// statement of the transaction (CLAUDE.md), and before the insert
+		// because a cap that ran afterwards would be deciding about a row the
+		// constraint had already accepted.
+		if err := s.checkPolicy(ctx, tx, req, f.ID, start, end); err != nil {
+			return err
+		}
+
 		// Mechanism A. A plain INSERT — no occupancy read precedes it.
 		id, createdAt, err := insertExclusive(ctx, tx, f.ID, req.UserID, start, end, idemKey)
 		if err != nil {
@@ -398,6 +457,10 @@ func (s *Service) attemptExclusive(ctx context.Context, f *facility.Facility, re
 	// on a FRESH connection from the pool (§4.5). Getting this wrong presents as
 	// a flaky test; it is not flaky, it is the aborted-transaction rule.
 	switch {
+	// Same reasoning as attemptShared: the refusal is already the message.
+	case errors.Is(txErr, ErrPolicyExceeded):
+		return nil, txErr
+
 	case errors.Is(txErr, store.ErrDeadlock):
 		// Surfaced to createExclusive, which decides whether to re-ask.
 		return nil, txErr

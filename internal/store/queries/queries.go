@@ -56,6 +56,12 @@ const (
 	ClosureZeroCapacity    = "closure_zero_capacity"
 	ClosureRestoreCapacity = "closure_restore_capacity"
 
+	// Fair-use policy and priority tiers (§11). Advisory by design — see
+	// internal/policy and IMPLEMENTATION.md §4.7.
+	PolicyResolve  = "policy_resolve"
+	PolicyUsage    = "policy_usage"
+	PolicyPriority = "policy_priority"
+
 	WaitlistHeadForUpdate = "waitlist_head_for_update"
 	WaitlistClaimHead     = "waitlist_claim_head"
 	WaitlistJoin          = "waitlist_join"
@@ -113,6 +119,9 @@ var required = []string{
 	ClosureReopen,
 	ClosureZeroCapacity,
 	ClosureRestoreCapacity,
+	PolicyResolve,
+	PolicyUsage,
+	PolicyPriority,
 	WaitlistHeadForUpdate,
 	WaitlistClaimHead,
 	WaitlistJoin,

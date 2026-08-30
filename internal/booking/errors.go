@@ -62,6 +62,20 @@ var (
 	ErrValidation = errors.New("validation failed")
 )
 
+// policyError carries a fair-use refusal from internal/policy into this
+// package's vocabulary without flattening it.
+//
+// Two unwrap targets, the same shape store.Error uses: errors.Is finds
+// ErrPolicyExceeded so httpx maps the status without importing the policy
+// package's sentinel, and errors.As still reaches *policy.LimitError so the 422
+// body can name the limit and when it resets. Collapsing it to a bare sentinel
+// would lose exactly the two fields that make the response actionable.
+type policyError struct{ cause error }
+
+func (e *policyError) Error() string { return e.cause.Error() }
+
+func (e *policyError) Unwrap() []error { return []error{ErrPolicyExceeded, e.cause} }
+
 // ValidationError names the field that failed, so the API can point the user at
 // the control that needs fixing instead of returning a wall of prose.
 type ValidationError struct {
