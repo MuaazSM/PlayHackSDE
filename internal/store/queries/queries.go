@@ -25,6 +25,7 @@ var files embed.FS
 // the package refuses to load.
 const (
 	BookingInsertExclusive = "booking_insert_exclusive"
+	BookingInsertShared    = "booking_insert_shared"
 	BookingLockFacility    = "booking_lock_facility"
 	BookingFindByIdem      = "booking_find_by_idem"
 	BookingEventInsert     = "booking_event_insert"
@@ -38,6 +39,7 @@ const (
 // required is checked against the embedded files at init.
 var required = []string{
 	BookingInsertExclusive,
+	BookingInsertShared,
 	BookingLockFacility,
 	BookingFindByIdem,
 	BookingEventInsert,

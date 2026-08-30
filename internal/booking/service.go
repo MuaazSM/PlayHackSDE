@@ -116,13 +116,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Booking, erro
 
 	// ---- 2. Branch on the facility's mechanism -----------------------------
 	if !f.IsExclusive {
-		// Explicit, not a silent fallthrough. Falling through to the exclusive
-		// insert would write a booking that bypasses capacity accounting
-		// entirely, and would additionally be rejected by an exclusion
-		// constraint that does not apply to shared rows.
-		return nil, fmt.Errorf("%w: facility %s is shared", ErrSharedNotImplemented, f.ID)
+		return s.createShared(ctx, f, req)
 	}
-
 	return s.createExclusive(ctx, f, req)
 }
 
@@ -170,6 +165,143 @@ func backoff(attempt int, user uuid.UUID) time.Duration {
 	base := time.Duration(1<<attempt) * time.Millisecond
 	jitter := time.Duration(user[0]) * 20 * time.Microsecond // 0-5ms
 	return base + jitter
+}
+
+// createShared is Mechanism B: claim a place in each slot the booking spans,
+// then write the booking. Both run in ONE transaction, so a booking can never
+// exist without its capacity being accounted for, and a counter can never be
+// incremented for a booking that rolled back.
+//
+// No advisory lock here, deliberately. The lock in front of Mechanism A exists
+// because concurrent overlapping inserts deadlock inside the GiST exclusion
+// constraint check. Shared rows carry is_exclusive = false and so are not in
+// that index at all; capacity_take serialises on a btree row lock instead, which
+// does not have the problem. Taking the facility lock here would cap the gym at
+// one concurrent booker and defeat the point of having capacity.
+func (s *Service) createShared(ctx context.Context, f *facility.Facility, req CreateRequest) (*Booking, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxDeadlockAttempts; attempt++ {
+		b, err := s.attemptShared(ctx, f, req)
+		if !errors.Is(err, store.ErrDeadlock) {
+			return b, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("booking: %w", ctx.Err())
+		case <-time.After(backoff(attempt, req.UserID)):
+		}
+	}
+	return nil, fmt.Errorf("booking: create: exhausted %d attempts: %w", maxDeadlockAttempts, lastErr)
+}
+
+func (s *Service) attemptShared(ctx context.Context, f *facility.Facility, req CreateRequest) (*Booking, error) {
+	var idemKey *string
+	if req.IdemKey != "" {
+		key := req.IdemKey
+		idemKey = &key
+	}
+
+	start, end := req.Start.UTC(), req.End().UTC()
+	slots := slotsFor(f, start, end)
+
+	var created Booking
+	txErr := store.WithTx(ctx, s.db.Primary, func(tx pgx.Tx) error {
+		// One capacity_take per slot, in ascending slot_start order. Consistent
+		// ordering across all callers is what keeps the multi-slot path
+		// deadlock-free: two transactions claiming the same rows in opposite
+		// orders would wait on each other.
+		//
+		// All of them are in this transaction, so a booking that spans two slots
+		// and finds the second one full releases the first automatically on
+		// rollback. There is no partial claim to clean up.
+		for _, slot := range slots {
+			if _, err := capacityTake(ctx, tx, f.ID, slot, f.Capacity); err != nil {
+				if errors.Is(err, ErrCapacityFull) {
+					return err
+				}
+				return store.Classify(err)
+			}
+		}
+
+		id, createdAt, err := insertShared(ctx, tx, f.ID, req.UserID, start, end, idemKey)
+		if err != nil {
+			return store.Classify(err)
+		}
+
+		if err := insertBookingEvent(ctx, tx, id, req.UserID, "CONFIRMED", "created"); err != nil {
+			return store.Classify(err)
+		}
+
+		if _, err := outbox.Enqueue(ctx, tx, outbox.TopicBookingConfirmed, map[string]any{
+			"booking_id":  id,
+			"facility_id": f.ID,
+			"user_id":     req.UserID,
+			"start":       start,
+			"end":         end,
+			"slots":       len(slots),
+		}); err != nil {
+			return store.Classify(err)
+		}
+
+		created = Booking{
+			ID:         id,
+			Reference:  Reference(id),
+			FacilityID: f.ID,
+			UserID:     req.UserID,
+			Start:      start,
+			End:        end,
+			Status:     "CONFIRMED",
+			IdemKey:    req.IdemKey,
+			CreatedAt:  createdAt,
+		}
+		return nil
+	})
+
+	if txErr == nil {
+		return &created, nil
+	}
+
+	switch {
+	case errors.Is(txErr, ErrCapacityFull):
+		return nil, txErr
+
+	case errors.Is(txErr, store.ErrDeadlock):
+		return nil, txErr
+
+	case errors.Is(txErr, store.ErrIdempotentReplay):
+		// Transaction already rolled back by WithTx; fresh connection now.
+		return s.findByIdemKey(ctx, req.UserID, req.IdemKey)
+
+	case errors.Is(txErr, store.ErrTimeout):
+		return nil, fmt.Errorf("booking: %w", context.DeadlineExceeded)
+
+	default:
+		return nil, fmt.Errorf("booking: create: %w", txErr)
+	}
+}
+
+// Release gives back every place a shared booking held, in its own transaction.
+//
+// The in-transaction primitive is ReleaseCapacity; use that from cancel and the
+// no-show sweep, which must release and change the booking status atomically.
+// This wrapper exists for callers that have nothing else to do.
+func (s *Service) Release(ctx context.Context, facilityID uuid.UUID, start, end time.Time) ([]Counter, error) {
+	f, err := s.catalogue.Get(ctx, facilityID)
+	if err != nil {
+		return nil, fmt.Errorf("booking: release: %w", err)
+	}
+
+	var out []Counter
+	err = store.WithTx(ctx, s.db.Primary, func(tx pgx.Tx) error {
+		var err error
+		out, err = ReleaseCapacity(ctx, tx, f, facilityID, start.UTC(), end.UTC())
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *Service) attemptExclusive(ctx context.Context, f *facility.Facility, req CreateRequest) (*Booking, error) {
@@ -353,6 +485,58 @@ func (s *Service) validate(f *facility.Facility, req CreateRequest) error {
 	// exactly at closing time does not extend past it.
 	if offsetEnd > f.ClosesAt {
 		return invalid("duration", "%s closes at %s", f.Name, clock(f.ClosesAt))
+	}
+
+	// Grid alignment applies to SHARED facilities only, and the asymmetry is
+	// deliberate rather than an oversight.
+	//
+	// Mechanism B keeps one counter row per (facility, slot_start). That key
+	// only means anything on a fixed grid: a booking starting at 18:30 has no
+	// counter row to increment, and inventing one would let 18:00-19:00 and
+	// 18:30-19:30 each claim a full capacity for overlapping time. So shared
+	// facilities are grid-aligned BY CONSTRUCTION.
+	//
+	// Exclusive facilities keep full variable-duration freedom, because
+	// Mechanism A protects a tstzrange with an exclusion constraint and needs no
+	// grid at all. The grid must not leak back into Mechanism A: a slot-key
+	// there would be silently incorrect the moment a duration varied.
+	if !f.IsExclusive {
+		if err := validateAlignment(f, req, offsetStart); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// CodeSlotNotAligned is the API error code for an off-grid shared booking.
+const CodeSlotNotAligned = "SLOT_NOT_ALIGNED"
+
+// validateAlignment requires the start to land on a granularity boundary and the
+// duration to be a whole number of slots.
+//
+// Boundaries are measured from the facility's opening time, not from midnight. A
+// venue opening at 05:30 with 60-minute slots has blocks at 05:30, 06:30, ... —
+// anchoring to midnight would declare every one of them misaligned.
+func validateAlignment(f *facility.Facility, req CreateRequest, offsetStart time.Duration) error {
+	if f.Granularity <= 0 {
+		return nil
+	}
+
+	if (offsetStart-f.OpensAt)%f.Granularity != 0 {
+		return &ValidationError{
+			Field:   "start",
+			Code:    CodeSlotNotAligned,
+			Message: fmt.Sprintf("%s books in %s blocks from %s", f.Name, f.Granularity, clock(f.OpensAt)),
+		}
+	}
+
+	if req.Duration%f.Granularity != 0 {
+		return &ValidationError{
+			Field:   "duration",
+			Code:    CodeSlotNotAligned,
+			Message: fmt.Sprintf("%s books in whole %s blocks", f.Name, f.Granularity),
+		}
 	}
 
 	return nil

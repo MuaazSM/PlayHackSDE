@@ -49,6 +49,23 @@ func facilityKey(id uuid.UUID) int32 {
 // The error is returned raw for the caller to classify. This function does not
 // interpret it, and it does not retry: a 23P01 means the caller lost, and the
 // loser must lose fast.
+// insertShared writes the booking row for a shared facility.
+//
+// is_exclusive is false, which keeps the row out of the no_double_book
+// constraint entirely — occupancy here was already decided by capacityTake.
+func insertShared(
+	ctx context.Context,
+	q store.Querier,
+	facilityID, userID uuid.UUID,
+	start, end time.Time,
+	idemKey *string,
+) (id uuid.UUID, createdAt time.Time, err error) {
+	err = q.QueryRow(ctx, queries.Get(queries.BookingInsertShared),
+		facilityID, userID, start, end, idemKey,
+	).Scan(&id, &createdAt)
+	return id, createdAt, err
+}
+
 func insertExclusive(
 	ctx context.Context,
 	q store.Querier,

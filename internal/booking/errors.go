@@ -49,7 +49,10 @@ var (
 // ValidationError names the field that failed, so the API can point the user at
 // the control that needs fixing instead of returning a wall of prose.
 type ValidationError struct {
-	Field   string
+	Field string
+	// Code is the stable machine-readable error code the API returns, e.g.
+	// SLOT_NOT_ALIGNED. Empty means the generic validation code.
+	Code    string
 	Message string
 }
 
@@ -76,7 +79,12 @@ func Field(err error) string {
 	return ""
 }
 
-// ErrSharedNotImplemented marks the Mechanism B branch as out of scope for this
-// phase. It is deliberately explicit rather than a silent fallthrough to the
-// exclusive path, which would insert a booking that bypasses capacity accounting.
-var ErrSharedNotImplemented = errors.New("shared-capacity booking is not implemented in this phase")
+// Code returns the machine-readable validation code, or "" if err is not a
+// validation error or carries no specific code.
+func Code(err error) string {
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return ve.Code
+	}
+	return ""
+}
