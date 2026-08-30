@@ -100,6 +100,10 @@ type PoolOptions struct {
 	MinConns    int32
 	MaxConnLife time.Duration
 	MaxConnIdle time.Duration
+
+	// Tracer observes every query on the pool. Left nil in production; tests use
+	// it to assert that a code path issued no queries at all.
+	Tracer pgx.QueryTracer
 }
 
 // NewPool opens and verifies one pgx pool.
@@ -125,6 +129,10 @@ func NewPool(ctx context.Context, opt PoolOptions) (*pgxpool.Pool, error) {
 	}
 	if opt.MaxConnIdle > 0 {
 		cfg.MaxConnIdleTime = opt.MaxConnIdle
+	}
+
+	if opt.Tracer != nil {
+		cfg.ConnConfig.Tracer = opt.Tracer
 	}
 
 	// Required when talking through a transaction-mode pooler.

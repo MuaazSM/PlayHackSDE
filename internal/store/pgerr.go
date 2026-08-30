@@ -22,6 +22,7 @@ import (
 //   23P01     no_double_book          ErrSlotTaken          409 SLOT_TAKEN
 //   23505     uq_bookings_user_idem   ErrIdempotentReplay   200 + original
 //   23505     uq_waitlist_live        ErrAlreadyWaiting     409 ALREADY_WAITING
+//   40P01     —                       ErrDeadlock           retried, then mapped
 //   0 rows    capacity_take           ErrCapacityFull       409 CAPACITY_FULL
 //   —         policy                  ErrPolicyExceeded     422 POLICY_LIMIT
 //   —         shed                    ErrShed               429 + Retry-After
@@ -32,6 +33,7 @@ import (
 const (
 	codeExclusionViolation = "23P01"
 	codeUniqueViolation    = "23505"
+	codeDeadlockDetected   = "40P01"
 )
 
 // Constraint names, as created in migrations 0003 and 0005. These are part of
@@ -72,6 +74,20 @@ var (
 
 	// ErrNotFound means a row that was expected to exist did not.
 	ErrNotFound = errors.New("not found")
+
+	// ErrDeadlock means Postgres chose this transaction as the victim to break a
+	// lock cycle and rolled it back. Nothing was written.
+	//
+	// This is reachable on the booking path for a structural reason. When two
+	// transactions insert overlapping rows, each places its index tuple before
+	// scanning for conflicts, so each can end up waiting on the other while
+	// checking the exclusion constraint. Postgres reports exactly that:
+	//
+	//	while checking exclusion constraint on tuple (14,2) in relation "bookings"
+	//
+	// Unlike a conflict, a deadlock carries no verdict — the transaction was
+	// aborted arbitrarily, not because it lost the slot. The caller may retry it.
+	ErrDeadlock = errors.New("deadlock detected")
 )
 
 // Error is a classified database error. It wraps both the domain sentinel and
@@ -133,6 +149,8 @@ func Classify(err error) error {
 	}
 
 	switch pgErr.Code {
+	case codeDeadlockDetected:
+		return newError(ErrDeadlock, pgErr)
 	case codeExclusionViolation:
 		if pgErr.ConstraintName == constraintNoDoubleBook {
 			return newError(ErrSlotTaken, pgErr)
