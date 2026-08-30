@@ -16,6 +16,13 @@ import (
 // gymCapacity is the seeded gymnasium's capacity (IMPLEMENTATION.md §0).
 const gymCapacity = 30
 
+// attempt is what one goroutine in the take/release race did, so the tally can
+// separate a release that decremented from one that matched nothing.
+type attempt struct {
+	kind    string // "take" | "release"
+	applied int    // slots actually decremented by a release
+}
+
 func counterFor(t *testing.T, pg *testutil.PG, facilityID uuid.UUID, slotStart time.Time) (booked, capacity int, exists bool) {
 	t.Helper()
 	err := pg.Pool.QueryRow(context.Background(),
@@ -374,8 +381,8 @@ func TestConcurrentTakeAndRelease(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	booked, _, _ := counterFor(t, pg, gym, start)
-	require.Equal(t, gymCapacity, booked)
+	initialBooked, _, _ := counterFor(t, pg, gym, start)
+	require.Equal(t, gymCapacity, initialBooked)
 
 	// Sample the counter while the race runs.
 	var (
@@ -384,8 +391,8 @@ func TestConcurrentTakeAndRelease(t *testing.T) {
 		minSeen    atomic.Int64
 		maxSeen    atomic.Int64
 	)
-	minSeen.Store(int64(booked))
-	maxSeen.Store(int64(booked))
+	minSeen.Store(int64(initialBooked))
+	maxSeen.Store(int64(initialBooked))
 
 	stopSampling := make(chan struct{})
 	samplingDone := make(chan struct{})
@@ -428,15 +435,19 @@ func TestConcurrentTakeAndRelease(t *testing.T) {
 		// Even indices take, odd indices release: 100 of each, interleaved on
 		// the same counter row.
 		if i%2 == 1 {
-			_, err := svc.Release(ctx, gym, start, end)
-			return "release", err
+			counters, err := svc.Release(ctx, gym, start, end)
+			// applied counts slots that ACTUALLY decremented. A release that
+			// matched zero rows is a no-op and returns no counter — tallying it
+			// as a decrement is exactly the lost-update the ledger below exists
+			// to catch.
+			return attempt{kind: "release", applied: len(counters)}, err
 		}
 
 		_, err := svc.Create(ctx, booking.CreateRequest{
 			FacilityID: gym, UserID: users[i/2], Start: start,
 			Duration: time.Hour, IdemKey: uuid.NewString(),
 		})
-		return "take", err
+		return attempt{kind: "take"}, err
 	})
 
 	close(stopSampling)
@@ -445,34 +456,46 @@ func TestConcurrentTakeAndRelease(t *testing.T) {
 	// Releases never fail. Takes either succeed or find the slot full; anything
 	// else — including a CHECK violation from an out-of-range counter — is a
 	// defect.
-	var tookOK, tookFull, releasedOK int
+	var tookOK, tookFull, releaseCalls, releasedOK, releaseNoop int
 	for _, a := range out.Attempts {
-		kind, _ := a.Value.(string)
+		r, _ := a.Value.(attempt)
 		switch {
-		case a.Err == nil && kind == "release":
-			releasedOK++
+		case a.Err == nil && r.kind == "release":
+			releaseCalls++
+			releasedOK += r.applied
+			if r.applied == 0 {
+				releaseNoop++
+			}
 		case a.Err == nil:
 			tookOK++
-		case errors.Is(a.Err, booking.ErrCapacityFull) && kind == "take":
+		case errors.Is(a.Err, booking.ErrCapacityFull) && r.kind == "take":
 			tookFull++
 		default:
 			t.Fatalf("attempt %d (%s) failed with an unclassified error, which is how a "+
-				"CHECK violation on the counter would present: %v", a.Index, kind, a.Err)
+				"CHECK violation on the counter would present: %v", a.Index, r.kind, a.Err)
 		}
 	}
-	require.Equal(t, releases, releasedOK, "a release must never fail")
+	require.Equal(t, releases, releaseCalls, "a release must never fail")
 	require.Equal(t, takes, tookOK+tookFull, "every take is a confirmation or a full slot")
 
 	finalBooked, finalCapacity, _ := counterFor(t, pg, gym, start)
 
-	t.Logf("takes=%d (ok=%d full=%d) releases=%d (ok=%d) final_booked=%d capacity=%d",
-		takes, tookOK, tookFull, releases, releasedOK, finalBooked, finalCapacity)
+	t.Logf("takes=%d (ok=%d full=%d) releases=%d (applied=%d noop=%d) initial=%d final_booked=%d capacity=%d",
+		takes, tookOK, tookFull, releases, releasedOK, releaseNoop,
+		initialBooked, finalBooked, finalCapacity)
 	t.Logf("sampled=%d violations=%d observed_range=[%d,%d] %s",
 		samples.Load(), violations.Load(), minSeen.Load(), maxSeen.Load(), out.Summarise())
 
 	require.Zero(t, violations.Load(),
 		"sampled the counter %d times and saw %d readings outside [0,%d]",
 		samples.Load(), violations.Load(), finalCapacity)
+
+	// Conservation. A range check passes even when an update is lost: a release
+	// tallied as applied that matched zero rows, or a decrement applied twice
+	// but landing back inside [0, capacity], are both invisible to it. The
+	// counter must equal the ledger of what actually happened to it.
+	require.Equal(t, initialBooked+tookOK-releasedOK, finalBooked,
+		"counter drifted from the take/release ledger")
 
 	require.GreaterOrEqual(t, finalBooked, 0)
 	require.LessOrEqual(t, finalBooked, finalCapacity)
