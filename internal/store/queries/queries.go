@@ -37,6 +37,7 @@ const (
 	CapacityRelease        = "capacity_release"
 	WaitlistHeadForUpdate  = "waitlist_head_for_update"
 	FacilityGet            = "facility_get"
+	FacilityList           = "facility_list"
 	OutboxInsert           = "outbox_insert"
 )
 
@@ -55,6 +56,7 @@ var required = []string{
 	CapacityRelease,
 	WaitlistHeadForUpdate,
 	FacilityGet,
+	FacilityList,
 	OutboxInsert,
 }
 

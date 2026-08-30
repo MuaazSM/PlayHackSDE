@@ -153,22 +153,46 @@ func (r *Repo) InvalidateAll() {
 	r.mu.Unlock()
 }
 
-func (r *Repo) load(ctx context.Context, id uuid.UUID) (*Facility, error) {
+// List returns the active catalogue.
+//
+// Not cached: it is a handful of rows behind an HTTP cache header, and caching a
+// list separately from the per-id entries would create two copies of the
+// catalogue that could disagree about the same facility.
+func (r *Repo) List(ctx context.Context) ([]Facility, error) {
+	rows, err := r.pool.Query(ctx, queries.Get(queries.FacilityList))
+	if err != nil {
+		return nil, fmt.Errorf("facility: list: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Facility
+	for rows.Next() {
+		f, err := scanFacility(rows)
+		if err != nil {
+			return nil, fmt.Errorf("facility: list: %w", err)
+		}
+		out = append(out, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("facility: list: %w", err)
+	}
+	return out, nil
+}
+
+// scanner is satisfied by both pgx.Row and pgx.Rows.
+type scanner interface{ Scan(dest ...any) error }
+
+func scanFacility(s scanner) (*Facility, error) {
 	var (
 		f                                     Facility
 		opensAt, closesAt                     pgtype.Time
 		granularity, minDuration, maxDuration pgtype.Interval
 	)
-
-	err := r.pool.QueryRow(ctx, queries.Get(queries.FacilityGet), id).Scan(
+	if err := s.Scan(
 		&f.ID, &f.Name, &f.Sport, &f.IsExclusive, &f.Capacity,
 		&opensAt, &closesAt, &granularity, &minDuration, &maxDuration, &f.IsActive,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("facility: load %s: %w", id, err)
+	); err != nil {
+		return nil, err
 	}
 
 	f.OpensAt = time.Duration(opensAt.Microseconds) * time.Microsecond
@@ -176,8 +200,18 @@ func (r *Repo) load(ctx context.Context, id uuid.UUID) (*Facility, error) {
 	f.Granularity = intervalToDuration(granularity)
 	f.MinDuration = intervalToDuration(minDuration)
 	f.MaxDuration = intervalToDuration(maxDuration)
-
 	return &f, nil
+}
+
+func (r *Repo) load(ctx context.Context, id uuid.UUID) (*Facility, error) {
+	f, err := scanFacility(r.pool.QueryRow(ctx, queries.Get(queries.FacilityGet), id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("facility: load %s: %w", id, err)
+	}
+	return f, nil
 }
 
 // intervalToDuration flattens a Postgres interval.

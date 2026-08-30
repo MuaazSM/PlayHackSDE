@@ -71,6 +71,12 @@ type Config struct {
 	GracePeriod  time.Duration // no-show window
 	PromotionTTL time.Duration // waitlist claim expiry
 
+	// Rate limits, per minute. Not correctness controls — the limiter fails
+	// open — so these are generous enough to be invisible to a real student and
+	// tight enough to make a script expensive.
+	RateLimitIPPerMin   int
+	RateLimitUserPerMin int
+
 	// Presentation
 	TZDisplay string
 
@@ -113,6 +119,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ShutdownTimeout, err = envSeconds("SHUTDOWN_TIMEOUT_SEC", 15); err != nil {
+		return nil, err
+	}
+	if c.RateLimitIPPerMin, err = envInt("RATE_LIMIT_IP_PER_MIN", 600); err != nil {
+		return nil, err
+	}
+	if c.RateLimitUserPerMin, err = envInt("RATE_LIMIT_USER_PER_MIN", 120); err != nil {
 		return nil, err
 	}
 

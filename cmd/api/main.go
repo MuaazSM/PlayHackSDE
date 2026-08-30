@@ -1,12 +1,8 @@
 // Command api is the single stateless API binary. N replicas, no local state.
-//
-// Phase 1 scope: config, pool, health probes, graceful shutdown. No booking
-// logic — the write path lands in M1 behind internal/booking.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -15,11 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/iitg-playhack/sportsbook/internal/booking"
 	"github.com/iitg-playhack/sportsbook/internal/config"
+	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/httpx"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/lmittmann/tint"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -55,16 +53,42 @@ func run(log *slog.Logger) error {
 		"max_conns", cfg.DBMaxConns,
 		"dedicated_replica", db.HasDedicatedReplica())
 
+	// Redis is optional by design. Rate limiting fails open and nothing on the
+	// booking path is authoritative here, so a Redis that will not connect
+	// degrades the service rather than preventing it from starting.
+	rdb := dialRedis(dialCtx, cfg, log)
+	if rdb != nil {
+		defer func() { _ = rdb.Close() }()
+	}
+
+	loc, err := time.LoadLocation(cfg.TZDisplay)
+	if err != nil {
+		return err
+	}
+
+	facilities := facility.NewRepo(db.Primary)
+	bookings := booking.NewService(db, facilities, loc)
+
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           newRouter(db),
+		Addr: cfg.HTTPAddr,
+		Handler: httpx.NewRouter(httpx.RouterDeps{
+			Config:     cfg,
+			DB:         db,
+			Redis:      rdb,
+			Bookings:   bookings,
+			Facilities: facilities,
+			Logger:     log,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("api listening", "addr", cfg.HTTPAddr, "auth_mode", cfg.AuthMode)
+		log.Info("api listening",
+			"addr", cfg.HTTPAddr,
+			"auth_mode", cfg.AuthMode,
+			"write_queue_depth", cfg.WriteQueueDepth)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -84,44 +108,21 @@ func run(log *slog.Logger) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancelShutdown()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return err
+	return srv.Shutdown(shutdownCtx)
+}
+
+func dialRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) *redis.Client {
+	opt, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Warn("redis url invalid, rate limiting disabled", "err", err)
+		return nil
 	}
-	return nil
-}
 
-func newRouter(db *store.DB) http.Handler {
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
-
-	// Liveness: the process is up. Never touches a dependency — a slow database
-	// must not get the container killed.
-	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	// Readiness: this replica can serve traffic, which requires the database.
-	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		if err := db.Health(ctx); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-				"status": "unready",
-				"reason": "database unreachable",
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-	})
-
-	return r
-}
-
-func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
+	rdb := redis.NewClient(opt)
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Warn("redis unreachable, rate limiting will fail open", "err", err)
+	} else {
+		log.Info("redis connected")
+	}
+	return rdb
 }
