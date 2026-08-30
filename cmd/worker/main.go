@@ -25,10 +25,12 @@ import (
 
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/live"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 	"github.com/lmittmann/tint"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -65,6 +67,20 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// The worker only PUBLISHES live updates (§9); the hubs that consume them
+	// live in the api replicas. When workers are not embedded this process owns
+	// the dispatcher, so without this the stream would go silent in exactly the
+	// deployment that has more than one api replica to fan out to.
+	loc, err := time.LoadLocation(cfg.TZDisplay)
+	if err != nil {
+		return err
+	}
+	rdb := dialRedis(dialCtx, cfg, log)
+	if rdb != nil {
+		defer func() { _ = rdb.Close() }()
+	}
+	dispatcher.WithSlotPublisher(live.NewPublisher(rdb, loc, log))
+
 	facilities := facility.NewRepo(db.Primary)
 	waiting := waitlist.NewService(db, facilities, cfg.PromotionTTL, log)
 
@@ -89,4 +105,25 @@ func run(log *slog.Logger) error {
 	// batch is not abandoned mid-send.
 	wg.Wait()
 	return nil
+}
+
+// dialRedis connects the live-update bus.
+//
+// Optional, exactly as it is in cmd/api: an unreachable Redis is logged and the
+// worker carries on. Nothing it drains depends on Redis, so the failure mode is
+// a quiet stream and a polling client — never a stalled outbox.
+func dialRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) *redis.Client {
+	opt, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Warn("redis url invalid, live updates disabled", "err", err)
+		return nil
+	}
+
+	rdb := redis.NewClient(opt)
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Warn("redis unreachable, live updates will not be published", "err", err)
+	} else {
+		log.Info("redis connected")
+	}
+	return rdb
 }

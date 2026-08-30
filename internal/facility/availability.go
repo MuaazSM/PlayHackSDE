@@ -194,10 +194,18 @@ func (a *Availability) CampusCached(ctx context.Context, date string) (*CampusGr
 	return a.fromCache(ctx, campusKey(date))
 }
 
-// campusKey is the one place the cache key is spelled. Two callers reading the
-// same entry under two different keys would look exactly like a cache that never
-// warms up.
-func campusKey(date string) string { return "avail:" + date }
+// CampusCacheKey is the one place the cache key is spelled. Two callers reading
+// the same entry under two different keys would look exactly like a cache that
+// never warms up.
+//
+// Exported because the live-update publisher (§9) invalidates this entry on
+// every state transition. It is a WRITER of this key while everything else here
+// is a reader, which makes a second spelling of the key even more dangerous
+// there: an invalidation aimed at a key nobody reads is indistinguishable from
+// working, right up until someone notices the grid is five seconds stale.
+func CampusCacheKey(date string) string { return "avail:" + date }
+
+func campusKey(date string) string { return CampusCacheKey(date) }
 
 func (a *Availability) fromCache(ctx context.Context, key string) (*CampusGrid, bool) {
 	if a.rdb == nil {

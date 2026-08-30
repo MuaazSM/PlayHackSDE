@@ -48,11 +48,33 @@ const (
 	listenRetryDelay = time.Second
 )
 
+// SlotPublisher is the live-update seam (§9).
+//
+// The dispatcher hands it every drained row and takes back an error it only
+// logs. The asymmetry with Notifier is the point: a notification that fails to
+// send is retried, a live update that fails to publish is forgotten. Redis is a
+// BUS here and never authoritative (non-negotiable #3), so a publish that does
+// not land costs a client one stale grid cell until its next fetch, and costs
+// correctness nothing at all. Retrying it would be strictly worse — the event is
+// about a moment that has already passed.
+//
+// Deliberately (topic, payload) rather than Message: the dispatcher stays
+// topic-agnostic, exactly as Message documents, and the mapping from a topic to
+// a slot state lives with the package that owns the grid's vocabulary.
+type SlotPublisher interface {
+	PublishTransition(ctx context.Context, topic string, payload json.RawMessage) error
+}
+
 // Options configures a Dispatcher. The zero value of every field falls back to
 // the Default* constants above.
 type Options struct {
 	// Notifier is the transport. Required.
 	Notifier Notifier
+
+	// SlotPublisher fans state transitions out to connected SSE clients (§9).
+	// Optional: left nil, the dispatcher publishes nothing and the system is
+	// exactly as correct, with clients falling back to polling.
+	SlotPublisher SlotPublisher
 
 	// ListenDSN is a DIRECT Postgres connection string for the LISTEN session —
 	// not the PgBouncer address. LISTEN is session state and transaction-mode
@@ -86,6 +108,7 @@ type Options struct {
 type Dispatcher struct {
 	db       *store.DB
 	notifier Notifier
+	slots    SlotPublisher
 	log      *slog.Logger
 
 	listenDSN    string
@@ -110,6 +133,7 @@ func NewDispatcher(db *store.DB, opt Options) *Dispatcher {
 	d := &Dispatcher{
 		db:           db,
 		notifier:     opt.Notifier,
+		slots:        opt.SlotPublisher,
 		log:          opt.Logger,
 		listenDSN:    opt.ListenDSN,
 		interval:     opt.Interval,
@@ -141,6 +165,17 @@ func NewDispatcher(db *store.DB, opt Options) *Dispatcher {
 	if d.maxBackoff <= 0 {
 		d.maxBackoff = DefaultMaxBackoff
 	}
+	return d
+}
+
+// WithSlotPublisher attaches the live-update fan-out after construction.
+//
+// Exists because NewFromConfig builds the dispatcher from configuration alone
+// while the publisher needs a dialled Redis client and the campus timezone,
+// which the binaries own. Widening NewFromConfig to take both would make every
+// caller supply a Redis client for a feature that is optional by design.
+func (d *Dispatcher) WithSlotPublisher(p SlotPublisher) *Dispatcher {
+	d.slots = p
 	return d
 }
 
@@ -357,6 +392,10 @@ func (d *Dispatcher) drainOnce(ctx context.Context) (int, error) {
 
 	var failed []int64
 	for _, m := range msgs {
+		// Live updates go first. They are what somebody is watching a screen
+		// for, and they must not queue behind a transport that is timing out.
+		d.publishSlot(ctx, m)
+
 		if err := d.notifier.Notify(ctx, m); err != nil {
 			d.log.Warn("notification send failed",
 				"outbox_id", m.ID, "topic", m.Topic, "attempt", m.Attempts, "err", err)
@@ -382,6 +421,22 @@ func (d *Dispatcher) drainOnce(ctx context.Context) (int, error) {
 	}
 
 	return len(msgs), nil
+}
+
+// publishSlot fans one transition out to connected clients.
+//
+// Best effort by construction. An error is logged and dropped: it is never
+// retried, and it NEVER contributes to the failed set — a Redis blip must not
+// mark an outbox row FAILED and re-deliver a notification that was already sent
+// perfectly well. The two side effects share a row and share nothing else.
+func (d *Dispatcher) publishSlot(ctx context.Context, m Message) {
+	if d.slots == nil {
+		return
+	}
+	if err := d.slots.PublishTransition(ctx, m.Topic, m.Payload); err != nil {
+		d.log.WarnContext(ctx, "live slot update not published; clients will see it on their next fetch",
+			"outbox_id", m.ID, "topic", m.Topic, "err", err)
+	}
 }
 
 // markFailed records the verdict for sends that did not go through.

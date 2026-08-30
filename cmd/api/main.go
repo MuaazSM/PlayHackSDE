@@ -15,6 +15,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
+	"github.com/iitg-playhack/sportsbook/internal/live"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
@@ -85,6 +86,25 @@ func run(log *slog.Logger) error {
 		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay)).
 		WithPromotion(waiting)
 
+	// Live updates (§9). The hub is this replica's half: it subscribes to Redis
+	// and fans out to the SSE clients connected HERE. Every replica runs one,
+	// which is what lets the dispatcher publish a transition once and have it
+	// reach every connected student without any replica knowing about another.
+	//
+	// Started unconditionally, whether or not workers are embedded: a replica
+	// that publishes nothing still has clients that need to receive.
+	hub := live.NewHub(rdb, log)
+	go func() {
+		if err := hub.Run(ctx); err != nil {
+			log.Error("live hub stopped", "err", err)
+		}
+	}()
+
+	// The publishing half, attached to the dispatcher below. Redis is a BUS for
+	// this and nothing more — non-negotiable #3 — so a nil client here silences
+	// live updates and changes nothing else about the system.
+	slots := live.NewPublisher(rdb, loc, log)
+
 	// Async work runs in-process for the demo, as CLAUDE.md allows: a ticker and
 	// one short transaction every thirty seconds, plus a dispatcher that is
 	// idle until something commits. Giving them their own deployment unit buys
@@ -98,6 +118,7 @@ func run(log *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		dispatcher.WithSlotPublisher(slots)
 		go func() {
 			if err := dispatcher.Run(ctx); err != nil {
 				log.Error("outbox dispatcher stopped", "err", err)
@@ -119,6 +140,7 @@ func run(log *slog.Logger) error {
 			Facilities:   facilities,
 			Availability: availability,
 			Waitlist:     waiting,
+			Live:         hub,
 			Logger:       log,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,

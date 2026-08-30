@@ -37,6 +37,16 @@ const (
 	// Time-critical: the student has PROMOTION_TTL_MIN to claim it.
 	TopicWaitlistPromoted = "waitlist.promoted"
 
+	// TopicWaitlistExpired — a promotion offer was not claimed inside its window
+	// and the held slot was released. Emitted by the waitlist sweeper (§6.3).
+	//
+	// Not in §8's original list, which named only the topics with a NOTIFICATION
+	// behind them; nobody is messaged about an offer they let lapse. It is here
+	// because §9's live stream needs it: without it a slot that was offered and
+	// never claimed stays "held" on every connected grid until the page is
+	// reloaded, which is a visibly wrong screen rather than a missing message.
+	TopicWaitlistExpired = "waitlist.expired"
+
 	// TopicBookingReminder — the slot starts shortly. Emitted by the reminder
 	// sweeper (Phase 11, check-in); no producer yet.
 	TopicBookingReminder = "booking.reminder"

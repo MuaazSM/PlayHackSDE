@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
@@ -88,6 +89,27 @@ func (s *Service) Sweep(ctx context.Context) (SweepResult, error) {
 			if _, err := tx.Exec(ctx, queries.Get(queries.BookingEventInsert),
 				h.bookingID, noActor, &statusHeld, "CANCELLED", "promotion offer expired"); err != nil {
 				return fmt.Errorf("waitlist: expiry event: %w", store.Classify(err))
+			}
+
+			// The released window, announced to anyone watching the grid (§9).
+			//
+			// Enqueued BEFORE the promotion below, and the order matters: outbox
+			// rows drain by (created_at, id), and every row in one transaction
+			// shares a created_at because now() is transaction time. The id is
+			// therefore the tiebreaker, so inserting here first is what makes a
+			// re-offered window publish free-then-held rather than the reverse
+			// and leave every grid showing a slot that is not actually free.
+			//
+			// Inside the sweep transaction, per non-negotiable #7: an expiry that
+			// rolls back takes this row with it.
+			if err := outbox.Enqueue(ctx, tx, outbox.TopicWaitlistExpired, map[string]any{
+				"booking_id":  h.bookingID,
+				"facility_id": h.facilityID,
+				"user_id":     h.userID,
+				"start":       h.start,
+				"end":         h.end,
+			}); err != nil {
+				return store.Classify(err)
 			}
 
 			promotion, err := s.promote(ctx, tx, h.facilityID, h.start, h.end)

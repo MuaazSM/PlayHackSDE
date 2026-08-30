@@ -12,6 +12,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/demo"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/live"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -39,6 +40,18 @@ type RouterDeps struct {
 	// point — a race console wired to its own service would be demonstrating
 	// that service rather than this one.
 	Demo *demo.Service
+
+	// Live backs GET /api/v1/stream (§9). Optional, but a hub is only useful if
+	// somebody is running it: left nil the router builds one over d.Redis that
+	// NOBODY HAS STARTED, so the route serves heartbeats and no events. That is
+	// the honest degraded mode rather than a 404 — a client that connects and
+	// polls is correct, just not live — and it is warned about at boot. Binaries
+	// pass their own and call Run on it.
+	Live *live.Hub
+
+	// StreamHeartbeat overrides the SSE comment interval. Zero uses
+	// StreamHeartbeat. Tests set it short; nothing in production should.
+	StreamHeartbeat time.Duration
 
 	Logger *slog.Logger
 }
@@ -86,6 +99,14 @@ func NewRouter(d RouterDeps) http.Handler {
 	}
 	demoHandlers := NewDemoHandlers(dm, loc)
 
+	hub := d.Live
+	if hub == nil {
+		log.Warn("no live hub supplied; SSE clients will receive heartbeats only",
+			"route", "GET /api/v1/stream")
+		hub = live.NewHub(d.Redis, log)
+	}
+	sse := NewSSE(hub, loc).WithHeartbeat(d.StreamHeartbeat)
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -115,6 +136,23 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Post("/dev/login", auth.DevLogin)
 			log.Warn("dev login enabled", "route", "POST /api/v1/dev/login")
 		}
+
+		// The live stream (§9), in its own group for one reason: bearerFromQuery
+		// has to run BEFORE auth, and the group below applies auth to everything
+		// registered inside it. EventSource cannot set an Authorization header,
+		// so without the shim the documented client could not authenticate at
+		// all. Scoped here so no other route accepts a token in its URL.
+		//
+		// Not shed, not idempotency-gated, not timed out: it is a read, it holds
+		// no database connection between events, and a write timeout on a
+		// connection designed to last hours would close it on the first one.
+		r.Group(func(r chi.Router) {
+			r.Use(bearerFromQuery)
+			r.Use(auth.Middleware)
+			r.Use(limiter.ByUser(d.Config.RateLimitUserPerMin))
+
+			r.Get("/stream", sse.Stream)
+		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(auth.Middleware)
