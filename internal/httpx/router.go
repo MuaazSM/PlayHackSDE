@@ -19,12 +19,13 @@ import (
 // RouterDeps is everything the HTTP layer needs. Passed in rather than
 // constructed here, so tests wire the same router against test doubles.
 type RouterDeps struct {
-	Config     *config.Config
-	DB         *store.DB
-	Redis      *redis.Client
-	Bookings   *booking.Service
-	Facilities *facility.Repo
-	Logger     *slog.Logger
+	Config       *config.Config
+	DB           *store.DB
+	Redis        *redis.Client
+	Bookings     *booking.Service
+	Facilities   *facility.Repo
+	Availability *facility.Availability
+	Logger       *slog.Logger
 }
 
 // NewRouter builds the API.
@@ -54,7 +55,11 @@ func NewRouter(d RouterDeps) http.Handler {
 	auth := NewAuthenticator(d.Config, d.DB.Primary)
 	limiter := NewRateLimiter(d.Redis, time.Minute, log)
 	shedder := NewShedder(d.Config.WriteQueueDepth, d.Config.WriteTimeout)
-	h := NewHandlers(d.Bookings, d.Facilities)
+	loc, err := time.LoadLocation(d.Config.TZDisplay)
+	if err != nil {
+		loc = time.UTC
+	}
+	h := NewHandlers(d.Bookings, d.Facilities, d.Availability, loc)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -88,6 +93,8 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Use(limiter.ByUser(d.Config.RateLimitUserPerMin))
 
 			r.Get("/facilities", h.ListFacilities)
+			r.Get("/facilities/{id}/availability", h.FacilityAvailability)
+			r.Get("/availability", h.CampusAvailability)
 			r.Get("/bookings/me", h.ListMyBookings)
 			r.Delete("/bookings/{id}", h.CancelBooking)
 

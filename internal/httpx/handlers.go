@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -15,13 +16,85 @@ import (
 // Handlers are deliberately thin: parse, validate shape, delegate, map, respond.
 // Business logic lives in internal/booking; nothing here decides who wins a slot.
 type Handlers struct {
-	bookings   *booking.Service
-	facilities *facility.Repo
+	bookings     *booking.Service
+	facilities   *facility.Repo
+	availability *facility.Availability
+	loc          *time.Location
 }
 
 // NewHandlers wires the HTTP edge to the domain.
-func NewHandlers(bookings *booking.Service, facilities *facility.Repo) *Handlers {
-	return &Handlers{bookings: bookings, facilities: facilities}
+func NewHandlers(bookings *booking.Service, facilities *facility.Repo, availability *facility.Availability, loc *time.Location) *Handlers {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return &Handlers{bookings: bookings, facilities: facilities, availability: availability, loc: loc}
+}
+
+// parseDate reads ?date=YYYY-MM-DD, defaulting to today in the campus timezone.
+//
+// "Today" is resolved in IST, not UTC. At 05:00 IST the UTC date is still
+// yesterday, so a UTC default would show a student the wrong day's grid every
+// morning — and the bug would look like missing data, not like a timezone
+// mistake.
+func (h *Handlers) parseDate(r *http.Request) (string, error) {
+	raw := r.URL.Query().Get("date")
+	if raw == "" || raw == "today" {
+		return time.Now().In(h.loc).Format("2006-01-02"), nil
+	}
+	if _, err := time.ParseInLocation("2006-01-02", raw, h.loc); err != nil {
+		return "", fmt.Errorf("%w: date must be YYYY-MM-DD", ErrBadRequest)
+	}
+	return raw, nil
+}
+
+// FacilityAvailability serves GET /api/v1/facilities/:id/availability?date=
+func (h *Handlers) FacilityAvailability(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		Error(w, r, fmt.Errorf("%w: facility id must be a UUID", ErrBadRequest))
+		return
+	}
+
+	date, err := h.parseDate(r)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	f, err := h.facilities.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, facility.ErrNotFound) {
+			Error(w, r, fmt.Errorf("%w: facility %s", booking.ErrNotFound, id))
+			return
+		}
+		Error(w, r, err)
+		return
+	}
+
+	day, err := h.availability.ForFacility(r.Context(), f, date)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+	JSON(w, http.StatusOK, day)
+}
+
+// CampusAvailability serves GET /api/v1/availability?date=
+//
+// One request for the whole discovery screen (FR-02, G-1).
+func (h *Handlers) CampusAvailability(w http.ResponseWriter, r *http.Request) {
+	date, err := h.parseDate(r)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	grid, err := h.availability.Campus(r.Context(), date)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+	JSON(w, http.StatusOK, grid)
 }
 
 // bookingResponse is the wire shape of a booking.

@@ -68,16 +68,20 @@ func run(log *slog.Logger) error {
 
 	facilities := facility.NewRepo(db.Primary)
 	bookings := booking.NewService(db, facilities, loc)
+	// Availability reads go to the replica, which falls back to the primary when
+	// DB_REPLICA_URL is unset.
+	availability := facility.NewAvailability(db.Replica, rdb, cfg.TZDisplay, log)
 
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpx.NewRouter(httpx.RouterDeps{
-			Config:     cfg,
-			DB:         db,
-			Redis:      rdb,
-			Bookings:   bookings,
-			Facilities: facilities,
-			Logger:     log,
+			Config:       cfg,
+			DB:           db,
+			Redis:        rdb,
+			Bookings:     bookings,
+			Facilities:   facilities,
+			Availability: availability,
+			Logger:       log,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
