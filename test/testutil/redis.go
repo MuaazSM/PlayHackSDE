@@ -80,3 +80,13 @@ func startRedis() (*redis.Client, string, error) {
 	}
 	return client, addr, nil
 }
+
+// DeadRedis returns a client pointed at an address nothing is listening on,
+// which is what a Redis outage looks like from inside the service.
+func DeadRedis() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 50 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+}
