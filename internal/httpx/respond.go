@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/demo"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 )
 
@@ -174,6 +175,13 @@ func classify(err error) (status int, code, message string) {
 
 	case errors.Is(err, booking.ErrPolicyExceeded):
 		return http.StatusUnprocessableEntity, CodePolicyLimit, err.Error()
+
+	// The race console's own request errors — a malformed n, an unknown
+	// facility, or a database nobody has seeded yet. Same class as a validation
+	// failure: the caller asked for something that cannot be run, and the
+	// message says what to change.
+	case errors.Is(err, demo.ErrInvalid), errors.Is(err, demo.ErrNoBookers):
+		return http.StatusUnprocessableEntity, CodeValidation, err.Error()
 
 	case errors.Is(err, booking.ErrValidation):
 		c := booking.Code(err)

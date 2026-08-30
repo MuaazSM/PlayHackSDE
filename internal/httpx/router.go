@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
 	"github.com/iitg-playhack/sportsbook/internal/config"
+	"github.com/iitg-playhack/sportsbook/internal/demo"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
@@ -32,6 +33,12 @@ type RouterDeps struct {
 	// exist as long as the API does, and a caller that has already wired the
 	// promotion hook passes its own so both halves share one service.
 	Waitlist *waitlist.Service
+
+	// Demo backs the race console (§13). Optional: left nil the router builds
+	// one over the SAME booking service the rest of the API uses, which is the
+	// point — a race console wired to its own service would be demonstrating
+	// that service rather than this one.
+	Demo *demo.Service
 
 	Logger *slog.Logger
 }
@@ -72,6 +79,12 @@ func NewRouter(d RouterDeps) http.Handler {
 		wl = waitlist.NewService(d.DB, d.Facilities, d.Config.PromotionTTL, log)
 	}
 	h := NewHandlers(d.Bookings, d.Facilities, d.Availability, wl, loc)
+
+	dm := d.Demo
+	if dm == nil {
+		dm = demo.NewService(d.DB, d.Bookings, d.Facilities)
+	}
+	demoHandlers := NewDemoHandlers(dm, loc)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -120,6 +133,23 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Post("/bookings/{id}/claim", h.ClaimBooking)
 			r.Post("/waitlist", h.JoinWaitlist)
 			r.Delete("/waitlist/{id}", h.LeaveWaitlist)
+
+			// The race console (§13). Registered ONLY in dev mode, the same
+			// rule POST /api/v1/dev/login follows and for the same reason:
+			// /demo/reset cancels whatever is standing in the demo slot, which
+			// is exactly right on a laptop and unacceptable against a live
+			// deployment. An endpoint like that should not be one config flag
+			// away from serving — in oidc mode the route does not exist.
+			//
+			// Neither route is shed, rate-shaped or idempotency-gated. The
+			// contention this demonstrates happens INSIDE the handler, between
+			// n goroutines calling the booking service directly; putting the
+			// shedder in front of the one request that starts them would mean
+			// measuring admission control and calling it a constraint.
+			if d.Config.DevAuthEnabled() {
+				r.Post("/demo/race", demoHandlers.Race)
+				r.Post("/demo/reset", demoHandlers.Reset)
+			}
 
 			// The write path, and the only shed route.
 			r.With(

@@ -25,7 +25,7 @@ MIGRATE := $(shell command -v migrate 2>/dev/null || echo "go run -tags 'postgre
 
 N ?= 500
 
-.PHONY: dev down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo lint tidy psql
+.PHONY: dev down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset lint tidy psql
 
 ## dev: bring up postgres, pgbouncer, redis and wait for health
 dev:
@@ -79,8 +79,16 @@ test-race:
 	go test ./test/concurrency/... -v -timeout 300s
 
 ## race-demo: fire N concurrent requests, print the outcome split
+##
+## Clears the slot first, so it is re-runnable back to back on stage. Override
+## with RACE_ARGS: `make race-demo N=500 RACE_ARGS=-reset=false` is the
+## "fire again — still 1" beat.
 race-demo:
-	go run ./cmd/racedemo -n $(N)
+	DB_URL="$(DB_URL)" go run ./cmd/racedemo -n $(N) $(RACE_ARGS)
+
+## race-reset: clear the demo slot without racing
+race-reset:
+	DB_URL="$(DB_URL)" go run ./cmd/racedemo -reset-only
 
 lint:
 	golangci-lint run

@@ -54,6 +54,13 @@ const (
 	AlternativesSameFacil  = "alternatives_same_facility"
 	AlternativesSameSport  = "alternatives_same_sport"
 	OutboxInsert           = "outbox_insert"
+
+	// The race console (§13). DemoCountConfirmed is the proof; the rest is
+	// stage management.
+	DemoCountConfirmed = "demo_count_confirmed"
+	DemoResetSlot      = "demo_reset_slot"
+	DemoBookers        = "demo_bookers"
+	DemoWinner         = "demo_winner"
 )
 
 // required is checked against the embedded files at init.
@@ -88,6 +95,10 @@ var required = []string{
 	AlternativesSameFacil,
 	AlternativesSameSport,
 	OutboxInsert,
+	DemoCountConfirmed,
+	DemoResetSlot,
+	DemoBookers,
+	DemoWinner,
 }
 
 var loaded map[string]string
