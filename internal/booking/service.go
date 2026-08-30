@@ -80,6 +80,10 @@ type Service struct {
 	catalogue Catalogue
 	loc       *time.Location
 	now       func() time.Time
+
+	// alts turns a 409 into somewhere else to go (§5.3). Optional: nil means a
+	// bare, still-correct, still-fast conflict. See WithAlternatives.
+	alts *Alternatives
 }
 
 // NewService wires the write path. loc is the campus timezone, used only to
@@ -127,10 +131,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Booking, erro
 	}
 
 	// ---- 2. Branch on the facility's mechanism -----------------------------
+	//
+	// onConflict decorates a lost race with alternatives and the waitlist flag
+	// (§5.3). It runs AFTER the transaction has rolled back — that is the whole
+	// reason it sits here and not inside either attempt — and it passes anything
+	// that is not a conflict straight through.
 	if !f.IsExclusive {
-		return s.createShared(ctx, f, req)
+		b, err := s.createShared(ctx, f, req)
+		return b, s.onConflict(ctx, f, req, err)
 	}
-	return s.createExclusive(ctx, f, req)
+	b, err := s.createExclusive(ctx, f, req)
+	return b, s.onConflict(ctx, f, req, err)
 }
 
 // maxDeadlockAttempts bounds the retry described on attemptExclusive.

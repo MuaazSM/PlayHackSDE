@@ -67,6 +67,9 @@ func NewRouter(d RouterDeps) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(Metrics)
 	r.Use(cors)
+	// Outermost, so every response — including one written by Recoverer's
+	// fallback or by a probe — renders times in the same zone.
+	r.Use(withDisplayLocation(loc))
 
 	// Probes and metrics sit outside auth AND outside rate limiting: a liveness
 	// probe that can be rate limited will eventually get the container killed
@@ -152,6 +155,32 @@ func timeout(d time.Duration) func(http.Handler) http.Handler {
 			ctx, cancel := context.WithTimeout(r.Context(), d)
 			defer cancel()
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+type displayLocCtx struct{}
+
+// DisplayLocation is the campus timezone for THIS request, defaulting to UTC.
+//
+// Error is a package-level function by design — one envelope, written in one
+// place — so it has no receiver to hang configuration on, and the one thing it
+// must localise is an alternative's start time. Carrying the zone on the request
+// context keeps that out of a package-level variable: two servers in one process
+// (which the tests do run) would otherwise share, and race on, one setting.
+func DisplayLocation(ctx context.Context) *time.Location {
+	if loc, ok := ctx.Value(displayLocCtx{}).(*time.Location); ok && loc != nil {
+		return loc
+	}
+	return time.UTC
+}
+
+// withDisplayLocation publishes the campus timezone to the error renderer.
+func withDisplayLocation(loc *time.Location) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(
+				context.WithValue(r.Context(), displayLocCtx{}, loc)))
 		})
 	}
 }

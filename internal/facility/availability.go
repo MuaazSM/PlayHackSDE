@@ -163,7 +163,7 @@ func (a *Availability) ForFacility(ctx context.Context, f *Facility, date string
 // a Postgres fallback would make a cache outage a feature outage; here it is a
 // latency change nobody notices.
 func (a *Availability) Campus(ctx context.Context, date string) (*CampusGrid, error) {
-	key := "avail:" + date
+	key := campusKey(date)
 
 	if grid, ok := a.fromCache(ctx, key); ok {
 		return grid, nil
@@ -177,6 +177,27 @@ func (a *Availability) Campus(ctx context.Context, date string) (*CampusGrid, er
 	a.toCache(ctx, key, grid)
 	return grid, nil
 }
+
+// CampusCached returns the grid ONLY if it is already warm in Redis, and never
+// falls through to Postgres.
+//
+// Campus is the right call for a page render: a miss should cost a query, not an
+// empty screen. This one exists for the 409 alternatives path (§5.3), which is
+// the opposite trade — it is spending someone's rejection latency, it has a 40 ms
+// budget for the whole enrichment, and an alternative is a nicety. So a cold
+// cache here means "fall back to the two narrow SQL queries", and the caller,
+// not this method, decides that.
+//
+// Returning a miss rather than querying is the whole point; do not "fix" this by
+// delegating to Campus.
+func (a *Availability) CampusCached(ctx context.Context, date string) (*CampusGrid, bool) {
+	return a.fromCache(ctx, campusKey(date))
+}
+
+// campusKey is the one place the cache key is spelled. Two callers reading the
+// same entry under two different keys would look exactly like a cache that never
+// warms up.
+func campusKey(date string) string { return "avail:" + date }
 
 func (a *Availability) fromCache(ctx context.Context, key string) (*CampusGrid, bool) {
 	if a.rdb == nil {

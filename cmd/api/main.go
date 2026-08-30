@@ -67,10 +67,15 @@ func run(log *slog.Logger) error {
 	}
 
 	facilities := facility.NewRepo(db.Primary)
-	bookings := booking.NewService(db, facilities, loc)
 	// Availability reads go to the replica, which falls back to the primary when
 	// DB_REPLICA_URL is unset.
 	availability := facility.NewAvailability(db.Replica, rdb, cfg.TZDisplay, log)
+
+	// A 409 carries somewhere else to go (§5.3). Replica-only and on a 40 ms
+	// budget, so enriching a rejection can never make it miss M-3; if this
+	// lookup is slow or the replica is unreachable, the conflict ships bare.
+	bookings := booking.NewService(db, facilities, loc).
+		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay))
 
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,

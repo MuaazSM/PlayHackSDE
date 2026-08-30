@@ -31,8 +31,12 @@ const (
 	CodeInternal        = "INTERNAL"
 )
 
-// Alternative is another slot the user could take instead. Populated in Phase 7;
-// the field exists now so the envelope shape does not change under clients.
+// Alternative is another slot the user could take instead.
+//
+// Three fields, exactly as §10.3 prints them, and start is a local HH:MM because
+// that is what the contract shows and what a student reads. It is not lossy in
+// practice: every alternative is on the same local day as the request they just
+// lost, which the client already knows.
 type Alternative struct {
 	FacilityID string `json:"facility_id"`
 	Name       string `json:"name"`
@@ -83,17 +87,60 @@ func Error(w http.ResponseWriter, r *http.Request, err error) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(RetryAfter().Round(time.Second).Seconds())))
 	}
 
-	JSON(w, status, ErrorBody{
+	body := ErrorBody{
 		Error:     code,
 		Message:   message,
 		RequestID: middleware.GetReqID(r.Context()),
-	})
+	}
+
+	// A conflict knows where else the user could go. Everything else omits both
+	// fields rather than sending an empty list — §10.3: they are absent where
+	// meaningless, so a client can test presence instead of emptiness.
+	var conflict *booking.Conflict
+	if errors.As(err, &conflict) {
+		body.Message = conflictMessage(conflict, code, message)
+		body.Alternatives = renderAlternatives(conflict.Alternatives, DisplayLocation(r.Context()))
+		body.WaitlistAvailable = &conflict.WaitlistAvailable
+	}
+
+	JSON(w, status, body)
+}
+
+// conflictMessage names the reason, per §10.3. The facility is what the student
+// was looking at, so saying it back is the difference between "something went
+// wrong" and "that court is gone".
+func conflictMessage(c *booking.Conflict, code, fallback string) string {
+	if c.FacilityName == "" {
+		return fallback
+	}
+	if code == CodeCapacityFull {
+		return c.FacilityName + " is full for that time."
+	}
+	return c.FacilityName + " was booked moments ago."
+}
+
+// renderAlternatives converts domain suggestions to the wire shape, localising
+// the start at the edge — the only place localisation happens (CLAUDE.md).
+func renderAlternatives(alts []booking.Alternative, loc *time.Location) []Alternative {
+	if len(alts) == 0 {
+		return nil
+	}
+	out := make([]Alternative, 0, len(alts))
+	for _, a := range alts {
+		out = append(out, Alternative{
+			FacilityID: a.FacilityID.String(),
+			Name:       a.Name,
+			Start:      a.Start.In(loc).Format("15:04"),
+		})
+	}
+	return out
 }
 
 func classify(err error) (status int, code, message string) {
 	switch {
 	case errors.Is(err, booking.ErrSlotTaken):
-		// Phase 7 fills in alternatives; the code and status are already final.
+		// The fallback prose. A *booking.Conflict replaces it with one that names
+		// the facility; this is what a conflict raised without one still says.
 		return http.StatusConflict, CodeSlotTaken, "That slot was taken moments ago."
 
 	case errors.Is(err, booking.ErrCapacityFull):

@@ -41,6 +41,8 @@ const (
 	AvailabilityFacility   = "availability_facility_day"
 	AvailabilityShared     = "availability_shared_day"
 	AvailabilityCampus     = "availability_campus_day"
+	AlternativesSameFacil  = "alternatives_same_facility"
+	AlternativesSameSport  = "alternatives_same_sport"
 	OutboxInsert           = "outbox_insert"
 )
 
@@ -63,6 +65,8 @@ var required = []string{
 	AvailabilityFacility,
 	AvailabilityShared,
 	AvailabilityCampus,
+	AlternativesSameFacil,
+	AlternativesSameSport,
 	OutboxInsert,
 }
 
