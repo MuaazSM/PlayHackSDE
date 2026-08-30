@@ -19,7 +19,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/store"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lmittmann/tint"
 )
 
@@ -47,21 +46,18 @@ func run(log *slog.Logger) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	pool, err := store.NewPool(dialCtx, store.PoolOptions{
-		URL:         cfg.DBURL,
-		MaxConns:    cfg.DBMaxConns,
-		MaxConnLife: time.Hour,
-		MaxConnIdle: 5 * time.Minute,
-	})
+	db, err := store.New(dialCtx, cfg)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-	log.Info("database connected", "max_conns", cfg.DBMaxConns)
+	defer db.Close()
+	log.Info("database connected",
+		"max_conns", cfg.DBMaxConns,
+		"dedicated_replica", db.HasDedicatedReplica())
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           newRouter(pool),
+		Handler:           newRouter(db),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -94,7 +90,7 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-func newRouter(pool *pgxpool.Pool) http.Handler {
+func newRouter(db *store.DB) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -111,7 +107,7 @@ func newRouter(pool *pgxpool.Pool) http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
-		if err := pool.Ping(ctx); err != nil {
+		if err := db.Health(ctx); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 				"status": "unready",
 				"reason": "database unreachable",

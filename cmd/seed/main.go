@@ -32,13 +32,13 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	pool, err := store.NewPool(ctx, store.PoolOptions{URL: cfg.DBURL, MaxConns: 4})
+	db, err := store.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer db.Close()
 
-	res, err := seed.Run(ctx, pool)
+	res, err := seed.Run(ctx, db.Primary)
 	if err != nil {
 		return err
 	}
