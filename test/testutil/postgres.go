@@ -21,6 +21,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/seed"
 	"github.com/iitg-playhack/sportsbook/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -87,6 +88,14 @@ func startPostgres() (*PG, error) {
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
 
+	// Match deploy/docker-compose.yml. Bounds how long a deadlock victim waits
+	// before it is aborted and can re-ask, which is what keeps the loser path
+	// fast under contention. Applied before the pool opens so every connection
+	// inherits it.
+	if err := tune(ctx, dsn); err != nil {
+		return nil, fmt.Errorf("tuning: %w", err)
+	}
+
 	// Exercise the real pool constructor, so the tests run against the same
 	// pgx configuration production uses.
 	db, err := store.New(ctx, &config.Config{
@@ -147,10 +156,19 @@ func (p *PG) truncateAll(ctx context.Context) error {
 	return err
 }
 
-// Warm opens n connections up front so a race does not measure connection setup
-// instead of contention.
+// Warm opens connections up front so a race measures contention rather than
+// connection setup.
+//
+// n is clamped to the pool's own maximum. Asking for more than that would block
+// on an acquire that can never succeed while this function still holds the
+// others, and burn the whole timeout doing nothing.
 func (p *PG) Warm(t *testing.T, n int) {
 	t.Helper()
+
+	if max := int(p.Pool.Config().MaxConns); n > max {
+		n = max
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -158,13 +176,25 @@ func (p *PG) Warm(t *testing.T, n int) {
 	for i := 0; i < n; i++ {
 		c, err := p.Pool.Acquire(ctx)
 		if err != nil {
-			break
+			t.Fatalf("testutil: warm pool (%d/%d): %v", i, n, err)
 		}
 		conns = append(conns, c)
 	}
 	for _, c := range conns {
 		c.Release()
 	}
+}
+
+// tune applies the same session settings the deploy stack sets on the server.
+func tune(ctx context.Context, dsn string) error {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	_, err = conn.Exec(ctx, `ALTER DATABASE playhack_test SET deadlock_timeout = '50ms'`)
+	return err
 }
 
 func migrateUp(dsn string) error {
@@ -198,4 +228,16 @@ func MigrationsDir() (string, error) {
 	// test/testutil/postgres.go -> repo root
 	root := filepath.Dir(filepath.Dir(filepath.Dir(thisFile)))
 	return filepath.Join(root, "migrations"), nil
+}
+
+// newTracedPool opens a pool with a query tracer attached.
+func newTracedPool(dsn string, tracer pgx.QueryTracer) (*pgxpool.Pool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	return store.NewPool(ctx, store.PoolOptions{
+		URL:      dsn,
+		MaxConns: 8,
+		Tracer:   tracer,
+	})
 }

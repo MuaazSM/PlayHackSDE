@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/seed"
 )
 
@@ -56,20 +58,41 @@ func (p *PG) Users(t *testing.T, n int) []uuid.UUID {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	ids := make([]uuid.UUID, 0, n)
+	// One statement rather than n. The race suite asks for 500 users and is a
+	// required CI gate; 500 round trips made it slow enough to be tempting to
+	// skip, which is the one thing CLAUDE.md forbids.
+	rolls := make([]string, n)
+	names := make([]string, n)
+	emails := make([]string, n)
 	for i := 0; i < n; i++ {
 		suffix := uuid.NewString()[:12]
+		rolls[i] = "t-" + suffix
+		names[i] = "Test " + suffix
+		emails[i] = "t-" + suffix + "@iitg.ac.in"
+	}
+
+	rows, err := p.Pool.Query(ctx, `
+		INSERT INTO users (roll_no, name, email)
+		SELECT * FROM unnest($1::text[], $2::text[], $3::citext[])
+		RETURNING id`, rolls, names, emails)
+	if err != nil {
+		t.Fatalf("testutil: create %d users: %v", n, err)
+	}
+	defer rows.Close()
+
+	ids := make([]uuid.UUID, 0, n)
+	for rows.Next() {
 		var id uuid.UUID
-		err := p.Pool.QueryRow(ctx, `
-			INSERT INTO users (roll_no, name, email)
-			VALUES ($1, $2, $3)
-			RETURNING id`,
-			"t-"+suffix, "Test "+suffix, "t-"+suffix+"@iitg.ac.in",
-		).Scan(&id)
-		if err != nil {
-			t.Fatalf("testutil: create user %d: %v", i, err)
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("testutil: scan user id: %v", err)
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("testutil: create users: %v", err)
+	}
+	if len(ids) != n {
+		t.Fatalf("testutil: expected %d users, got %d", n, len(ids))
 	}
 	return ids
 }
@@ -113,3 +136,52 @@ func TSTZRange(start, end time.Time) string {
 	const layout = "2006-01-02 15:04:05.999999-07"
 	return "[" + start.UTC().Format(layout) + "," + end.UTC().Format(layout) + ")"
 }
+
+// BookingService wires a booking service over the test database, using the same
+// constructors production uses.
+func (p *PG) BookingService(t *testing.T) *booking.Service {
+	t.Helper()
+	return p.BookingServiceWith(t, Catalogue(t, p))
+}
+
+// BookingServiceWith wires a service over a caller-supplied catalogue, so a test
+// can warm or instrument the exact cache the service will consult.
+func (p *PG) BookingServiceWith(t *testing.T, cat booking.Catalogue) *booking.Service {
+	t.Helper()
+	return booking.NewService(p.DB, cat, IST)
+}
+
+// WarmCatalogue primes the facility cache so a later assertion about query
+// counts measures the path under test rather than the first cache miss.
+func WarmCatalogue(t *testing.T, cat booking.Catalogue, ids ...uuid.UUID) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for _, id := range ids {
+		if _, err := cat.Get(ctx, id); err != nil {
+			t.Fatalf("testutil: warm catalogue %s: %v", id, err)
+		}
+	}
+}
+
+// ExclusiveFacilityIDs are the six seeded courts and grounds, all open at
+// 18:00 IST. Used by the cross-facility contention test.
+func ExclusiveFacilityIDs() []uuid.UUID {
+	out := make([]uuid.UUID, 0, 6)
+	for _, f := range seed.Facilities {
+		if f.IsExclusive {
+			out = append(out, f.ID())
+		}
+	}
+	return out
+}
+
+// Catalogue returns a facility repo over the test database.
+func Catalogue(t *testing.T, p *PG) *facility.Repo {
+	t.Helper()
+	return facility.NewRepo(p.Pool)
+}
+
+// FacilityIDBySlug resolves a seeded facility by its slug.
+func FacilityIDBySlug(slug string) uuid.UUID { return facilityID(slug) }
