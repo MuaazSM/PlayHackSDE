@@ -54,6 +54,10 @@ const (
 	AlternativesSameFacil  = "alternatives_same_facility"
 	AlternativesSameSport  = "alternatives_same_sport"
 	OutboxInsert           = "outbox_insert"
+	OutboxDrain            = "outbox_drain"
+	OutboxMarkFailed       = "outbox_mark_failed"
+	OutboxRequeueFailed    = "outbox_requeue_failed"
+	OutboxListen           = "outbox_listen"
 
 	// The race console (§13). DemoCountConfirmed is the proof; the rest is
 	// stage management.
@@ -95,6 +99,10 @@ var required = []string{
 	AlternativesSameFacil,
 	AlternativesSameSport,
 	OutboxInsert,
+	OutboxDrain,
+	OutboxMarkFailed,
+	OutboxRequeueFailed,
+	OutboxListen,
 	DemoCountConfirmed,
 	DemoResetSlot,
 	DemoBookers,

@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
@@ -389,11 +390,27 @@ func (s *Service) offerHead(ctx context.Context, q pgx.Tx, facilityID uuid.UUID,
 		return nil, fmt.Errorf("waitlist: promotion event: %w", store.Classify(err))
 	}
 
-	// 4. TODO(Phase 9 — outbox): enqueue 'waitlist.promoted' here, with
-	//    outbox.Enqueue(ctx, q, outbox.TopicWaitlistPromoted, ...). It belongs on
-	//    THIS savepoint, and therefore inside the cancelling transaction, so a
-	//    promotion that rolls back cannot notify anybody it never happened to —
-	//    non-negotiable #7. Nothing sends from here directly.
+	// 4. The offer's side effect, on THIS savepoint and therefore inside the
+	//    cancelling transaction. A promotion that loses the window to 23P01
+	//    rolls the savepoint back, taking this row with it, so a student is
+	//    never told about a court they were not actually offered —
+	//    non-negotiable #7. Nothing sends from here; a worker does, after the
+	//    commit.
+	//
+	//    The offer expiry travels in the payload because this notification is
+	//    the only thing that makes the claim window usable: a promotion nobody
+	//    hears about expires unclaimed and the queue moves for nothing.
+	if err := outbox.Enqueue(ctx, q, outbox.TopicWaitlistPromoted, map[string]any{
+		"entry_id":      p.EntryID,
+		"booking_id":    p.BookingID,
+		"facility_id":   facilityID,
+		"user_id":       p.UserID,
+		"start":         start,
+		"end":           end,
+		"offer_expires": p.OfferExpires,
+	}); err != nil {
+		return nil, store.Classify(err)
+	}
 
 	s.log.InfoContext(ctx, "waitlist promotion offered",
 		"entry_id", p.EntryID, "user_id", p.UserID, "booking_id", p.BookingID,

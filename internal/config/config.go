@@ -49,6 +49,17 @@ type Config struct {
 	DBReplicaURL string // falls back to DBURL
 	DBMaxConns   int32
 
+	// DBListenURL is a DIRECT Postgres connection string for the outbox
+	// dispatcher's LISTEN session — deliberately separate from DBURL, which
+	// points at PgBouncer.
+	//
+	// LISTEN is session state. Transaction-mode pooling hands the backend to
+	// another client the moment the transaction ends, so a subscription taken
+	// through the pooler is dropped without anybody being told. Falls back to
+	// DBURL, which is correct for the demo (no pooler in front of it) and wrong
+	// in front of PgBouncer — set it explicitly there.
+	DBListenURL string
+
 	// Cache / bus
 	RedisURL string
 
@@ -77,6 +88,27 @@ type Config struct {
 	RateLimitIPPerMin   int
 	RateLimitUserPerMin int
 
+	// Side effects — §8. Nothing here affects correctness: the outbox rows are
+	// written either way, and these only decide who eventually reads them.
+	//
+	// EmbedWorkers runs the dispatcher and the sweepers inside the api binary.
+	// Default true, because the demo is one process and one process cannot lose
+	// half of itself on stage. Set false when running cmd/worker separately.
+	EmbedWorkers bool
+
+	// NotifierKind selects the transport: "log" (demo default), "webpush",
+	// "email".
+	NotifierKind string
+
+	// Web Push identity (RFC 8292). Pinned, not generated at boot — rotating the
+	// keypair invalidates every existing browser subscription.
+	VAPIDPublicKey  string
+	VAPIDPrivateKey string
+	VAPIDSubject    string
+
+	// EmailFrom is the envelope sender for the email fallback.
+	EmailFrom string
+
 	// Presentation
 	TZDisplay string
 
@@ -91,6 +123,12 @@ func Load() (*Config, error) {
 	c := &Config{
 		DBURL:             env("DB_URL", "postgres://playhack:playhack@localhost:6432/playhack?sslmode=disable"),
 		DBReplicaURL:      env("DB_REPLICA_URL", ""),
+		DBListenURL:       env("DB_LISTEN_URL", ""),
+		NotifierKind:      strings.ToLower(env("NOTIFIER", "log")),
+		VAPIDPublicKey:    env("VAPID_PUBLIC_KEY", ""),
+		VAPIDPrivateKey:   env("VAPID_PRIVATE_KEY", ""),
+		VAPIDSubject:      env("VAPID_SUBJECT", ""),
+		EmailFrom:         env("EMAIL_FROM", ""),
 		RedisURL:          env("REDIS_URL", "redis://localhost:6379"),
 		AuthMode:          AuthMode(strings.ToLower(env("AUTH_MODE", "dev"))),
 		JWTSecret:         env("JWT_SECRET", "dev-secret-not-for-production"),
@@ -126,6 +164,16 @@ func Load() (*Config, error) {
 	}
 	if c.RateLimitUserPerMin, err = envInt("RATE_LIMIT_USER_PER_MIN", 120); err != nil {
 		return nil, err
+	}
+	if c.EmbedWorkers, err = envBool("EMBED_WORKERS", true); err != nil {
+		return nil, err
+	}
+
+	// The dispatcher's LISTEN session defaults to the main URL. Correct for the
+	// demo, where nothing sits in front of Postgres; set DB_LISTEN_URL to the
+	// direct port when PgBouncer does.
+	if c.DBListenURL == "" {
+		c.DBListenURL = c.DBURL
 	}
 
 	// DB_REPLICA_URL is optional; availability reads fall back to the primary.
@@ -163,6 +211,11 @@ func (c *Config) validate() error {
 	if _, err := time.LoadLocation(c.TZDisplay); err != nil {
 		return fmt.Errorf("config: TZ_DISPLAY %q is not a known location: %w", c.TZDisplay, err)
 	}
+	switch c.NotifierKind {
+	case "log", "webpush", "email":
+	default:
+		return fmt.Errorf("config: NOTIFIER must be log, webpush or email, got %q", c.NotifierKind)
+	}
 	return nil
 }
 
@@ -186,6 +239,18 @@ func envInt(key string, def int) (int, error) {
 		return 0, fmt.Errorf("config: %s must be an integer: %w", key, err)
 	}
 	return n, nil
+}
+
+func envBool(key string, def bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("config: %s must be a boolean: %w", key, err)
+	}
+	return b, nil
 }
 
 func envInt32(key string, def int32) (int32, error) {

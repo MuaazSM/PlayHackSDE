@@ -17,6 +17,11 @@ DB_URL         ?= postgres://playhack:playhack@localhost:$(PGBOUNCER_HOST_PORT)/
 # Direct to Postgres. golang-migrate takes a SESSION advisory lock, which a
 # transaction-mode pooler cannot honour, so migrations must bypass PgBouncer.
 DB_MIGRATE_URL ?= postgres://playhack:playhack@localhost:$(POSTGRES_HOST_PORT)/playhack?sslmode=disable
+# Also direct, and for the same family of reason: the outbox dispatcher holds a
+# LISTEN, which is session state. Through PgBouncer the subscription would look
+# established and then quietly receive nothing — the dispatcher would fall back
+# to its 5s ticker and nobody would be told why.
+DB_LISTEN_URL  ?= $(DB_MIGRATE_URL)
 REDIS_URL      ?= redis://localhost:$(REDIS_HOST_PORT)
 
 # Use the migrate CLI if it is installed; otherwise run it straight from the
@@ -65,10 +70,12 @@ seed:
 
 ## run: API on :8080
 run:
-	DB_URL="$(DB_URL)" REDIS_URL="$(REDIS_URL)" go run ./cmd/api
+	DB_URL="$(DB_URL)" DB_LISTEN_URL="$(DB_LISTEN_URL)" REDIS_URL="$(REDIS_URL)" go run ./cmd/api
 
+## worker: outbox dispatcher + sweepers as a separate process. Not needed for
+## the demo — `make run` embeds them (EMBED_WORKERS defaults to true).
 worker:
-	DB_URL="$(DB_URL)" REDIS_URL="$(REDIS_URL)" go run ./cmd/worker
+	DB_URL="$(DB_URL)" DB_LISTEN_URL="$(DB_LISTEN_URL)" REDIS_URL="$(REDIS_URL)" go run ./cmd/worker
 
 ## test: unit + integration
 test:

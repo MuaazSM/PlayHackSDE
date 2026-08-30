@@ -178,7 +178,7 @@ func (s *Service) Cancel(ctx context.Context, bookingID, actorID uuid.UUID, reas
 			}
 		}
 
-		if _, err := outbox.Enqueue(ctx, tx, outbox.TopicBookingCancelled, map[string]any{
+		if err := outbox.Enqueue(ctx, tx, outbox.TopicBookingCancelled, map[string]any{
 			"booking_id":  bookingID,
 			"facility_id": row.facilityID,
 			"user_id":     row.userID,

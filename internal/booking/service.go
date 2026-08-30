@@ -261,7 +261,7 @@ func (s *Service) attemptShared(ctx context.Context, f *facility.Facility, req C
 			return store.Classify(err)
 		}
 
-		if _, err := outbox.Enqueue(ctx, tx, outbox.TopicBookingConfirmed, map[string]any{
+		if err := outbox.Enqueue(ctx, tx, outbox.TopicBookingConfirmed, map[string]any{
 			"booking_id":  id,
 			"facility_id": f.ID,
 			"user_id":     req.UserID,
@@ -362,7 +362,7 @@ func (s *Service) attemptExclusive(ctx context.Context, f *facility.Facility, re
 		// Side effects go through the outbox, inside this transaction. The
 		// trigger's pg_notify fires on commit, so a rolled-back booking can
 		// never produce a notification.
-		if _, err := outbox.Enqueue(ctx, tx, outbox.TopicBookingConfirmed, map[string]any{
+		if err := outbox.Enqueue(ctx, tx, outbox.TopicBookingConfirmed, map[string]any{
 			"booking_id":  id,
 			"facility_id": f.ID,
 			"user_id":     req.UserID,

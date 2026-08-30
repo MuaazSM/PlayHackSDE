@@ -15,6 +15,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
+	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 	"github.com/lmittmann/tint"
@@ -84,10 +85,29 @@ func run(log *slog.Logger) error {
 		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay)).
 		WithPromotion(waiting)
 
-	// Run in-process for the demo, as CLAUDE.md allows. It is a ticker and one
-	// short transaction every thirty seconds; giving it its own binary would add
-	// a deployment unit and no capability.
-	go waiting.RunSweeper(ctx, waitlist.SweepInterval)
+	// Async work runs in-process for the demo, as CLAUDE.md allows: a ticker and
+	// one short transaction every thirty seconds, plus a dispatcher that is
+	// idle until something commits. Giving them their own deployment unit buys
+	// no capability at this scale and gives the demo a second process to lose.
+	//
+	// EMBED_WORKERS=false hands them to cmd/worker instead. Nothing about
+	// correctness moves with them — the outbox rows and the expired holds are
+	// written either way; only the delay before somebody acts on them changes.
+	if cfg.EmbedWorkers {
+		dispatcher, err := outbox.NewFromConfig(db, cfg, log)
+		if err != nil {
+			return err
+		}
+		go func() {
+			if err := dispatcher.Run(ctx); err != nil {
+				log.Error("outbox dispatcher stopped", "err", err)
+			}
+		}()
+		go waiting.RunSweeper(ctx, waitlist.SweepInterval)
+	} else {
+		log.Info("workers not embedded; run cmd/worker separately",
+			"embed_workers", false)
+	}
 
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,

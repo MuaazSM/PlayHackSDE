@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
@@ -99,8 +100,26 @@ func (s *Service) Claim(ctx context.Context, bookingID, actorID uuid.UUID) (*Boo
 			return store.Classify(err)
 		}
 
-		// TODO(Phase 9 — outbox): enqueue 'booking.confirmed' for the claimed
-		// hold here, inside this transaction.
+		// The claimed hold is a confirmation like any other, so it publishes the
+		// same topic the create path does — a client should not need to know
+		// whether a booking arrived by racing for it or by waiting for it.
+		// Inside this transaction, per non-negotiable #7: a claim that loses to
+		// the sweeper rolls back and takes this row with it.
+		//
+		// Deliberately NOT on the converged path above. A retried claim has
+		// already been notified about; enqueueing there would push a second
+		// "confirmed" for every response that got lost on the way back, which is
+		// the noise idempotency exists to prevent.
+		if err := outbox.Enqueue(ctx, tx, outbox.TopicBookingConfirmed, map[string]any{
+			"booking_id":  row.id,
+			"facility_id": row.facilityID,
+			"user_id":     row.userID,
+			"start":       row.start,
+			"end":         row.end,
+			"source":      "waitlist_claim",
+		}); err != nil {
+			return store.Classify(err)
+		}
 
 		claimed = Booking{
 			ID:         row.id,
