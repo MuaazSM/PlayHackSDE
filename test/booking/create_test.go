@@ -181,23 +181,37 @@ func TestOverlappingPartial(t *testing.T) {
 	require.Equal(t, 1, confirmedCount(t, pg, court))
 }
 
-// TestCreate_SharedFacilityIsExplicitlyOutOfScope pins the Mechanism B branch.
-// A silent fallthrough to the exclusive insert would write a booking that
-// bypasses capacity accounting.
-func TestCreate_SharedFacilityIsExplicitlyOutOfScope(t *testing.T) {
+// TestCreate_SharedFacilityUsesMechanismB checks the branch routes to capacity
+// accounting rather than to the exclusive insert. A booking on the gym must
+// create a counter row; one on a court must not.
+func TestCreate_SharedFacilityUsesMechanismB(t *testing.T) {
 	pg := testutil.Postgres(t)
 	svc := pg.BookingService(t)
 	ctx := context.Background()
 
 	start, _ := testutil.Slot18()
 
-	_, err := svc.Create(ctx, booking.CreateRequest{
+	b, err := svc.Create(ctx, booking.CreateRequest{
 		FacilityID: testutil.GymID(),
 		UserID:     testutil.StudentID(0),
 		Start:      start,
 		Duration:   time.Hour,
 		IdemKey:    uuid.NewString(),
 	})
-	require.ErrorIs(t, err, booking.ErrSharedNotImplemented)
-	require.Equal(t, 0, confirmedCount(t, pg, testutil.GymID()), "no row may be written")
+	require.NoError(t, err)
+	require.Equal(t, "CONFIRMED", b.Status)
+
+	var booked, capacity int
+	require.NoError(t, pg.Pool.QueryRow(ctx,
+		`SELECT booked, capacity FROM slot_capacity WHERE facility_id = $1 AND slot_start = $2`,
+		testutil.GymID(), start).Scan(&booked, &capacity))
+	require.Equal(t, 1, booked)
+	require.Equal(t, 30, capacity)
+
+	// The row is not in the exclusion constraint's index, which is what lets a
+	// second person book the same hour.
+	var isExclusive bool
+	require.NoError(t, pg.Pool.QueryRow(ctx,
+		`SELECT is_exclusive FROM bookings WHERE id = $1`, b.ID).Scan(&isExclusive))
+	require.False(t, isExclusive)
 }
