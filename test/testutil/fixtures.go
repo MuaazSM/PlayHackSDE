@@ -185,3 +185,13 @@ func Catalogue(t *testing.T, p *PG) *facility.Repo {
 
 // FacilityIDBySlug resolves a seeded facility by its slug.
 func FacilityIDBySlug(slug string) uuid.UUID { return facilityID(slug) }
+
+// UserIDByRoll resolves a seeded account by its roll number, e.g. "manager01".
+func UserIDByRoll(roll string) uuid.UUID {
+	for _, u := range seed.Users {
+		if u.RollNo == roll {
+			return u.ID()
+		}
+	}
+	panic("testutil: unknown seeded user " + roll)
+}
