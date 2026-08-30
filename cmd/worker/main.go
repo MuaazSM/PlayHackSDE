@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/iitg-playhack/sportsbook/internal/checkin"
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/live"
@@ -84,8 +85,16 @@ func run(log *slog.Logger) error {
 	facilities := facility.NewRepo(db.Primary)
 	waiting := waitlist.NewService(db, facilities, cfg.PromotionTTL, log)
 
+	// The no-show sweeper (§7), promoting through the SAME waitlist service the
+	// expiry sweeper uses. Two services would each hold their own claim window
+	// and the queue would behave differently depending on which sweeper freed the
+	// court.
+	attendance := checkin.NewService(db, facilities,
+		checkin.NewMinter(cfg.CheckinHMACSecret), cfg.GracePeriod, log).
+		WithPromotion(waiting)
+
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
@@ -96,6 +105,10 @@ func run(log *slog.Logger) error {
 	go func() {
 		defer wg.Done()
 		waiting.RunSweeper(ctx, waitlist.SweepInterval)
+	}()
+	go func() {
+		defer wg.Done()
+		attendance.RunSweeper(ctx, checkin.SweepInterval)
 	}()
 
 	<-ctx.Done()

@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/checkin"
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/demo"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
@@ -34,6 +35,13 @@ type RouterDeps struct {
 	// exist as long as the API does, and a caller that has already wired the
 	// promotion hook passes its own so both halves share one service.
 	Waitlist *waitlist.Service
+
+	// Checkin backs the venue QR and the no-show release (§7). Optional, and
+	// left nil the router builds one over the same database — but WITHOUT the
+	// promotion hook, because the hook belongs to whoever also runs the sweeper.
+	// A binary that wants a no-show to promote off the queue passes its own,
+	// wired to the SAME waitlist.Service the cancel path uses.
+	Checkin *checkin.Service
 
 	// Demo backs the race console (§13). Optional: left nil the router builds
 	// one over the SAME booking service the rest of the API uses, which is the
@@ -92,6 +100,20 @@ func NewRouter(d RouterDeps) http.Handler {
 		wl = waitlist.NewService(d.DB, d.Facilities, d.Config.PromotionTTL, log)
 	}
 	h := NewHandlers(d.Bookings, d.Facilities, d.Availability, wl, loc)
+
+	ci := d.Checkin
+	if ci == nil {
+		ci = checkin.NewService(d.DB, d.Facilities,
+			checkin.NewMinter(d.Config.CheckinHMACSecret), d.Config.GracePeriod, log)
+	}
+	if !ci.Minter().Enabled() {
+		// Fail closed and say so at boot. An empty secret means every check-in
+		// is refused, which is the right behaviour and the wrong surprise to
+		// discover at the venue door.
+		log.Warn("CHECKIN_HMAC_SECRET is not set; check-in will refuse every token",
+			"route", "POST /api/v1/bookings/{id}/check-in")
+	}
+	checkinHandlers := NewCheckinHandlers(ci)
 
 	dm := d.Demo
 	if dm == nil {
@@ -171,6 +193,18 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Post("/bookings/{id}/claim", h.ClaimBooking)
 			r.Post("/waitlist", h.JoinWaitlist)
 			r.Delete("/waitlist/{id}", h.LeaveWaitlist)
+
+			// Check-in (§7). Neither is shed: a student standing at the door
+			// with ninety seconds of token validity left must not be told to
+			// come back later because somebody else is booking, and the venue
+			// display's poll is a read.
+			//
+			// The token route is MANAGER-only. It hands out a bearer proof of
+			// being at the venue, so serving it to students would let anybody
+			// check in from anywhere and the no-show numbers would mean nothing.
+			r.With(RequireRole(RoleManager)).
+				Get("/facilities/{id}/checkin-token", checkinHandlers.FacilityToken)
+			r.Post("/bookings/{id}/check-in", checkinHandlers.CheckIn)
 
 			// The race console (§13). Registered ONLY in dev mode, the same
 			// rule POST /api/v1/dev/login follows and for the same reason:

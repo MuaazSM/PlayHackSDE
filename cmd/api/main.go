@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/checkin"
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
@@ -86,6 +87,14 @@ func run(log *slog.Logger) error {
 		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay)).
 		WithPromotion(waiting)
 
+	// Check-in and automatic release (§7). It takes the SAME waitlist service the
+	// cancel path does, which is the entire economy of this feature: a released
+	// no-show reaches the queue through one implementation of promotion, so there
+	// is nothing here that could disagree with a cancellation about who is next.
+	attendance := checkin.NewService(db, facilities,
+		checkin.NewMinter(cfg.CheckinHMACSecret), cfg.GracePeriod, log).
+		WithPromotion(waiting)
+
 	// Live updates (§9). The hub is this replica's half: it subscribes to Redis
 	// and fans out to the SSE clients connected HERE. Every replica runs one,
 	// which is what lets the dispatcher publish a transition once and have it
@@ -125,6 +134,7 @@ func run(log *slog.Logger) error {
 			}
 		}()
 		go waiting.RunSweeper(ctx, waitlist.SweepInterval)
+		go attendance.RunSweeper(ctx, checkin.SweepInterval)
 	} else {
 		log.Info("workers not embedded; run cmd/worker separately",
 			"embed_workers", false)
@@ -140,6 +150,7 @@ func run(log *slog.Logger) error {
 			Facilities:   facilities,
 			Availability: availability,
 			Waitlist:     waiting,
+			Checkin:      attendance,
 			Live:         hub,
 			Logger:       log,
 		}),

@@ -38,26 +38,33 @@ const (
 	BookingInsertHeld      = "booking_insert_held"
 	BookingClaimHeld       = "booking_claim_held"
 	BookingExpireHeld      = "booking_expire_held"
-	WaitlistHeadForUpdate  = "waitlist_head_for_update"
-	WaitlistClaimHead      = "waitlist_claim_head"
-	WaitlistJoin           = "waitlist_join"
-	WaitlistLeave          = "waitlist_leave"
-	WaitlistPlace          = "waitlist_place"
-	WaitlistPromote        = "waitlist_promote"
-	WaitlistMarkClaimed    = "waitlist_mark_claimed"
-	WaitlistMarkExpired    = "waitlist_mark_expired"
-	FacilityGet            = "facility_get"
-	FacilityList           = "facility_list"
-	AvailabilityFacility   = "availability_facility_day"
-	AvailabilityShared     = "availability_shared_day"
-	AvailabilityCampus     = "availability_campus_day"
-	AlternativesSameFacil  = "alternatives_same_facility"
-	AlternativesSameSport  = "alternatives_same_sport"
-	OutboxInsert           = "outbox_insert"
-	OutboxDrain            = "outbox_drain"
-	OutboxMarkFailed       = "outbox_mark_failed"
-	OutboxRequeueFailed    = "outbox_requeue_failed"
-	OutboxListen           = "outbox_listen"
+
+	// Check-in and automatic release (§7).
+	CheckinRedeem           = "checkin_redeem"
+	CheckinGet              = "checkin_get"
+	BookingMarkNoShow       = "booking_mark_no_show"
+	BookingCompleteAttended = "booking_complete_attended"
+
+	WaitlistHeadForUpdate = "waitlist_head_for_update"
+	WaitlistClaimHead     = "waitlist_claim_head"
+	WaitlistJoin          = "waitlist_join"
+	WaitlistLeave         = "waitlist_leave"
+	WaitlistPlace         = "waitlist_place"
+	WaitlistPromote       = "waitlist_promote"
+	WaitlistMarkClaimed   = "waitlist_mark_claimed"
+	WaitlistMarkExpired   = "waitlist_mark_expired"
+	FacilityGet           = "facility_get"
+	FacilityList          = "facility_list"
+	AvailabilityFacility  = "availability_facility_day"
+	AvailabilityShared    = "availability_shared_day"
+	AvailabilityCampus    = "availability_campus_day"
+	AlternativesSameFacil = "alternatives_same_facility"
+	AlternativesSameSport = "alternatives_same_sport"
+	OutboxInsert          = "outbox_insert"
+	OutboxDrain           = "outbox_drain"
+	OutboxMarkFailed      = "outbox_mark_failed"
+	OutboxRequeueFailed   = "outbox_requeue_failed"
+	OutboxListen          = "outbox_listen"
 
 	// The race console (§13). DemoCountConfirmed is the proof; the rest is
 	// stage management.
@@ -83,6 +90,10 @@ var required = []string{
 	BookingInsertHeld,
 	BookingClaimHeld,
 	BookingExpireHeld,
+	CheckinRedeem,
+	CheckinGet,
+	BookingMarkNoShow,
+	BookingCompleteAttended,
 	WaitlistHeadForUpdate,
 	WaitlistClaimHead,
 	WaitlistJoin,

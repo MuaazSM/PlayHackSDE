@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/checkin"
 	"github.com/iitg-playhack/sportsbook/internal/demo"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 )
@@ -24,6 +25,9 @@ const (
 	CodeOfferExpired    = "OFFER_EXPIRED"
 	CodeAlreadyWaiting  = "ALREADY_WAITING"
 	CodeNotWaiting      = "NOT_WAITING"
+	CodeCheckinToken    = "CHECKIN_TOKEN_INVALID"
+	CodeCheckinWindow   = "CHECKIN_WINDOW"
+	CodeNotCheckable    = "NOT_CHECKABLE"
 	CodeValidation      = "VALIDATION_FAILED"
 	CodePolicyLimit     = "POLICY_LIMIT"
 	CodeNotFound        = "NOT_FOUND"
@@ -158,6 +162,19 @@ func classify(err error) (status int, code, message string) {
 		return http.StatusConflict, CodeOfferExpired,
 			"That offer has expired — the slot went to the next student in the queue."
 
+	// Check-in (§7). The token failure is a 403 rather than a 422: the request
+	// is well formed, the caller simply cannot prove they are at the venue.
+	case errors.Is(err, checkin.ErrInvalidToken):
+		return http.StatusForbidden, CodeCheckinToken,
+			"That code is not valid here — scan the one on the venue display."
+
+	case errors.Is(err, checkin.ErrOutsideWindow):
+		return http.StatusConflict, CodeCheckinWindow,
+			"Check-in opens ten minutes before your slot and closes shortly after it starts."
+
+	case errors.Is(err, checkin.ErrNotCheckable):
+		return http.StatusConflict, CodeNotCheckable, "That booking can no longer be checked into."
+
 	case errors.Is(err, waitlist.ErrAlreadyWaiting):
 		return http.StatusConflict, CodeAlreadyWaiting, "You are already in the queue for that slot."
 
@@ -199,6 +216,13 @@ func classify(err error) (status int, code, message string) {
 	case errors.Is(err, booking.ErrForbidden):
 		return http.StatusForbidden, CodeForbidden, "That booking belongs to someone else."
 
+	// A role the caller does not hold. Distinct from the sentence above because
+	// the two are different facts: one is "not yours", the other is "not your
+	// job", and telling a student their manager console is somebody else's
+	// booking would be nonsense.
+	case errors.Is(err, ErrForbiddenRole):
+		return http.StatusForbidden, CodeForbidden, "You do not have permission to do that."
+
 	case errors.Is(err, booking.ErrShed):
 		return http.StatusTooManyRequests, CodeShed, "Too many bookings at once — try again in a moment."
 
@@ -223,4 +247,8 @@ var (
 	ErrUnauthenticated = errors.New("unauthenticated")
 	ErrRateLimited     = errors.New("rate limited")
 	ErrBadRequest      = errors.New("bad request")
+
+	// ErrForbiddenRole means the caller is authenticated but lacks the role a
+	// route requires. Raised by RequireRole.
+	ErrForbiddenRole = errors.New("role not permitted")
 )
