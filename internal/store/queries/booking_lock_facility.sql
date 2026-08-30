@@ -1,0 +1,17 @@
+-- Serialise write attempts for one facility, for the duration of the enclosing
+-- transaction. IMPLEMENTATION.md §4.3 background.
+--
+-- THIS DOES NOT DECIDE WHO WINS. The exclusion constraint decides, exactly as
+-- before; delete this statement and the system is still correct, just slower and
+-- prone to deadlock. It is a contention shaper, not a correctness mechanism.
+--
+-- Why it is needed: when two transactions insert overlapping windows, each
+-- places its index tuple BEFORE scanning for conflicts, so each can end up
+-- waiting on the other while checking the exclusion constraint. Postgres reports
+-- it as exactly that, and at 500-way contention roughly a third of requests are
+-- aborted as deadlock victims rather than receiving a clean conflict.
+--
+-- Transaction-scoped, so it is released by COMMIT or ROLLBACK — there is no
+-- unlock path to leak. Keyed per facility, so contention on one court never
+-- touches another.
+SELECT pg_advisory_xact_lock($1::int, $2::int);

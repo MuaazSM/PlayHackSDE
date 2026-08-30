@@ -25,17 +25,27 @@ var files embed.FS
 // the package refuses to load.
 const (
 	BookingInsertExclusive = "booking_insert_exclusive"
+	BookingLockFacility    = "booking_lock_facility"
+	BookingFindByIdem      = "booking_find_by_idem"
+	BookingEventInsert     = "booking_event_insert"
 	CapacityTake           = "capacity_take"
 	CapacityRelease        = "capacity_release"
 	WaitlistHeadForUpdate  = "waitlist_head_for_update"
+	FacilityGet            = "facility_get"
+	OutboxInsert           = "outbox_insert"
 )
 
 // required is checked against the embedded files at init.
 var required = []string{
 	BookingInsertExclusive,
+	BookingLockFacility,
+	BookingFindByIdem,
+	BookingEventInsert,
 	CapacityTake,
 	CapacityRelease,
 	WaitlistHeadForUpdate,
+	FacilityGet,
+	OutboxInsert,
 }
 
 var loaded map[string]string
