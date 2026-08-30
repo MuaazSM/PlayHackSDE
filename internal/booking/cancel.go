@@ -42,6 +42,19 @@ func (s *Service) Cancel(ctx context.Context, bookingID, actorID uuid.UUID, reas
 
 	var cancelled Booking
 	err := store.WithTx(ctx, s.db.Primary, func(tx pgx.Tx) error {
+		// This load exists ONLY to shape the error: it separates 404 from 403,
+		// which a single guarded UPDATE cannot do because both collapse into
+		// "zero rows".
+		//
+		// The invariant that keeps it on the right side of the read-then-write
+		// ban: NOTHING READ HERE FEEDS THE UPDATE'S DECISION. The guarded UPDATE
+		// alone decides whether the cancel happens, so a load that goes stale
+		// mid-race degrades to zero rows and ErrNotCancellable — a correct
+		// answer, never an incorrect write.
+		//
+		// Do not "optimise" this by dropping the UPDATE's status guard because
+		// the status was already checked here. That is precisely the
+		// read-then-write bug, reintroduced.
 		existing, err := loadBooking(ctx, tx, bookingID)
 		if err != nil {
 			return err

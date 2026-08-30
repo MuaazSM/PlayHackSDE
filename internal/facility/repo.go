@@ -54,6 +54,22 @@ type entry struct {
 }
 
 // Repo reads the catalogue, with a TTL cache in front.
+//
+// CONSTRAINT ON ANY REWRITE OF THIS TYPE: Get is called from INSIDE a booking
+// transaction (booking.Cancel needs the facility to decide whether to release a
+// capacity counter). The conventions forbid network calls inside a transaction,
+// and this only complies because a cache miss is a local Postgres read on a
+// pooled connection — fast, and against the same server the transaction already
+// holds.
+//
+// Backing this cache with Redis, or any other out-of-process store, would put a
+// network round trip inside a transaction holding locks and would violate that
+// rule invisibly. If a shared cache is ever wanted, either keep an in-process
+// tier in front of it, or hoist the lookup out of the transaction and pass the
+// facility in.
+//
+// The pub/sub invalidation hook (Invalidate) is fine: it is a push, and it does
+// not run on the transaction's path.
 type Repo struct {
 	pool *pgxpool.Pool
 	ttl  time.Duration
