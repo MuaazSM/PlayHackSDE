@@ -102,13 +102,15 @@ func newAPI(t *testing.T, opts ...option) *api {
 
 	facilities := facility.NewRepo(pg.Pool)
 	svc := booking.NewService(pg.DB, facilities, loc)
+	availability := facility.NewAvailability(pg.DB.Replica, rdb, cfg.TZDisplay, nil)
 
 	srv := httptest.NewServer(httpx.NewRouter(httpx.RouterDeps{
-		Config:     cfg,
-		DB:         pg.DB,
-		Redis:      rdb,
-		Bookings:   svc,
-		Facilities: facilities,
+		Config:       cfg,
+		DB:           pg.DB,
+		Redis:        rdb,
+		Bookings:     svc,
+		Facilities:   facilities,
+		Availability: availability,
 	}))
 	t.Cleanup(srv.Close)
 
