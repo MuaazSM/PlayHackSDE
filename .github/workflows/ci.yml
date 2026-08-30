@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the version go.mod targets, with GOTOOLCHAIN=local so the
+      # toolchain REFUSES to silently upgrade. This is what enforces the Go 1.22
+      # line: without it, a dependency or a stdlib call needing a newer Go (say
+      # t.Context(), added in 1.24) is downloaded around rather than reported,
+      # and the version claim quietly stops being true.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: false
+
+      - name: Refuse toolchain upgrades
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      - name: Go version in use
+        run: go version
+
+      - name: Verify go.mod still targets 1.22
+        run: |
+          want=1.22
+          got=$(awk '/^go /{print $2}' go.mod | cut -d. -f1,2)
+          if [ "$got" != "$want" ]; then
+            echo "go.mod targets $got, expected $want" >&2
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal ./test)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # The race suite is a REQUIRED gate. CLAUDE.md forbids skipping it to make
+      # CI faster; it is the only thing standing between a green build and an
+      # overbooked court. Runners provide Docker, which testcontainers needs.
+      - name: Tests
+        run: go test ./... -race -timeout 20m
