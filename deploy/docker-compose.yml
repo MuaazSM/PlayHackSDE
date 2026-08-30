@@ -24,6 +24,13 @@ services:
       - password_encryption=md5
       - -c
       - max_connections=200
+      # Concurrent inserts for overlapping windows can form a genuine lock cycle
+      # while checking the exclusion constraint (each places its index tuple
+      # before scanning). The default 1s detection makes a deadlocked loser
+      # 1s slow, which blows the p99<150ms rejection target. Booking
+      # transactions are ~1ms, so legitimate waits never approach this.
+      - -c
+      - deadlock_timeout=50ms
     ports:
       # Host port is overridable: a locally-installed PostgreSQL binds
       # 127.0.0.1:5432 first and silently wins over Docker's wildcard bind.
