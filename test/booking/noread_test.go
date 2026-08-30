@@ -103,3 +103,45 @@ func firstLine(s string) string {
 	}
 	return ""
 }
+
+// TestCreate_AdvisoryLockInvariants pins the two constraints CLAUDE.md places on
+// the accepted advisory-lock exception.
+//
+// Both are invisible at runtime until they are violated in production:
+//
+//   - Transaction-scoped. A session-scoped pg_advisory_lock would be acquired on
+//     a PgBouncer backend and then handed to a different client on the next
+//     transaction, leaking the lock and eventually wedging the facility.
+//   - First statement of the transaction. Taken after the insert, it would
+//     serialise nothing — the deadlock it exists to prevent happens during the
+//     insert's own constraint check.
+func TestCreate_AdvisoryLockInvariants(t *testing.T) {
+	pg := testutil.Postgres(t)
+
+	db, rec := pg.RecordingDB(t)
+	cat := facility.NewRepo(db.Primary)
+	svc := booking.NewService(db, cat, testutil.IST)
+
+	court := testutil.CourtID()
+	testutil.WarmCatalogue(t, cat, court)
+	start, _ := testutil.Slot18()
+
+	rec.Reset()
+	_, err := svc.Create(context.Background(), booking.CreateRequest{
+		FacilityID: court, UserID: testutil.StudentID(0), Start: start,
+		Duration: time.Hour, IdemKey: uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	stmts := rec.Statements()
+	require.GreaterOrEqual(t, len(stmts), 3)
+
+	// stmts[0] is the BEGIN issued by the pool.
+	require.Equal(t, "begin", strings.ToLower(strings.TrimSpace(stmts[0])))
+
+	lock := strings.ToLower(stripLineComments(stmts[1]))
+	require.Contains(t, lock, "pg_advisory_xact_lock",
+		"the advisory lock must be the first statement of the transaction; statement 1 was:\n%s", stmts[1])
+	require.NotContains(t, lock, "pg_advisory_lock(",
+		"the lock must be transaction-scoped — a session-scoped lock leaks under PgBouncer transaction pooling")
+}
