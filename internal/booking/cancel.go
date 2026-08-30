@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,6 +13,29 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
 )
+
+// Promoter is the waitlist's half of a cancellation, declared here so the
+// dependency points one way: booking knows there is a queue, and internal/
+// waitlist knows about bookings. waitlist.Service satisfies it.
+//
+// The method takes a pgx.Tx rather than a pool BECAUSE it must run inside the
+// cancelling transaction — the same reason outbox.Enqueue does. A promotion
+// that could be committed on its own would eventually be committed on its own,
+// leaving a student holding a court whose original booking never went away.
+//
+// Its contract, which Cancel relies on: whatever it returns, this transaction
+// is still usable. An implementation that cannot promise that must return an
+// error rather than leaving an aborted transaction behind.
+type Promoter interface {
+	Promote(ctx context.Context, tx pgx.Tx, facilityID uuid.UUID, start, end time.Time) error
+}
+
+// WithPromotion attaches the waitlist to the cancel path. Optional: without it
+// a cancellation is simply a cancellation, and every other guarantee holds.
+func (s *Service) WithPromotion(p Promoter) *Service {
+	s.promoter = p
+	return s
+}
 
 // roleManager may act on any booking, not only their own.
 const roleManager = "MANAGER"
@@ -128,14 +152,31 @@ func (s *Service) Cancel(ctx context.Context, bookingID, actorID uuid.UUID, reas
 			return store.Classify(err)
 		}
 
-		// TODO(Phase 8 — waitlist promotion, §6.2): claim the head of the queue
-		// for this facility and window with FOR UPDATE SKIP LOCKED, insert a
-		// HELD booking with held_until = now() + PROMOTION_TTL_MIN, mark the
-		// waitlist row PROMOTED, and enqueue 'waitlist.promoted'. It belongs in
-		// THIS transaction so a promotion cannot outlive a rolled-back cancel.
-		// The cancel must never fail because a promotion failed — wrap the
-		// promotion in a savepoint so a 23P01 there rolls back only the
-		// promotion.
+		// The freed window is offered to the head of the queue HERE, in this
+		// transaction, so a promotion cannot outlive a cancel that rolled back
+		// (§6.2). internal/waitlist runs it under a savepoint and guarantees this
+		// transaction is still usable whatever it returns.
+		//
+		// The error is logged and dropped ON PURPOSE. A cancel must never fail
+		// because a promotion failed: the student cancelling did nothing wrong,
+		// their court is genuinely released either way, and the queue entry that
+		// could not be promoted is still WAITING for the sweeper or the next
+		// cancel to pick up. Turning somebody else's missed offer into this
+		// student's error would be the wrong person paying.
+		//
+		// Exclusive facilities only. A HELD row reserves nothing on a shared
+		// facility, whose occupancy is the slot_capacity counter rather than the
+		// exclusion constraint, so an offer there would not hold the place it
+		// promised. waitlist.Join refuses those queues for the same reason.
+		if s.promoter != nil && row.isExclusive {
+			if err := s.promoter.Promote(ctx, tx, row.facilityID, row.start, row.end); err != nil {
+				slog.WarnContext(ctx, "waitlist promotion failed; cancellation stands",
+					"err", err,
+					"booking_id", bookingID,
+					"facility_id", row.facilityID,
+					"start", row.start)
+			}
+		}
 
 		if _, err := outbox.Enqueue(ctx, tx, outbox.TopicBookingCancelled, map[string]any{
 			"booking_id":  bookingID,

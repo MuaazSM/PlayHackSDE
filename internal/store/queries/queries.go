@@ -35,7 +35,17 @@ const (
 	BookingEventInsert     = "booking_event_insert"
 	CapacityTake           = "capacity_take"
 	CapacityRelease        = "capacity_release"
+	BookingInsertHeld      = "booking_insert_held"
+	BookingClaimHeld       = "booking_claim_held"
+	BookingExpireHeld      = "booking_expire_held"
 	WaitlistHeadForUpdate  = "waitlist_head_for_update"
+	WaitlistClaimHead      = "waitlist_claim_head"
+	WaitlistJoin           = "waitlist_join"
+	WaitlistLeave          = "waitlist_leave"
+	WaitlistPlace          = "waitlist_place"
+	WaitlistPromote        = "waitlist_promote"
+	WaitlistMarkClaimed    = "waitlist_mark_claimed"
+	WaitlistMarkExpired    = "waitlist_mark_expired"
 	FacilityGet            = "facility_get"
 	FacilityList           = "facility_list"
 	AvailabilityFacility   = "availability_facility_day"
@@ -59,7 +69,17 @@ var required = []string{
 	BookingEventInsert,
 	CapacityTake,
 	CapacityRelease,
+	BookingInsertHeld,
+	BookingClaimHeld,
+	BookingExpireHeld,
 	WaitlistHeadForUpdate,
+	WaitlistClaimHead,
+	WaitlistJoin,
+	WaitlistLeave,
+	WaitlistPlace,
+	WaitlistPromote,
+	WaitlistMarkClaimed,
+	WaitlistMarkExpired,
 	FacilityGet,
 	FacilityList,
 	AvailabilityFacility,

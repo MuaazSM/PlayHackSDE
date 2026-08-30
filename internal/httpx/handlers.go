@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 )
 
 // Handlers are deliberately thin: parse, validate shape, delegate, map, respond.
@@ -19,15 +20,22 @@ type Handlers struct {
 	bookings     *booking.Service
 	facilities   *facility.Repo
 	availability *facility.Availability
+	waitlist     *waitlist.Service
 	loc          *time.Location
 }
 
 // NewHandlers wires the HTTP edge to the domain.
-func NewHandlers(bookings *booking.Service, facilities *facility.Repo, availability *facility.Availability, loc *time.Location) *Handlers {
+func NewHandlers(bookings *booking.Service, facilities *facility.Repo, availability *facility.Availability, wl *waitlist.Service, loc *time.Location) *Handlers {
 	if loc == nil {
 		loc = time.UTC
 	}
-	return &Handlers{bookings: bookings, facilities: facilities, availability: availability, loc: loc}
+	return &Handlers{
+		bookings:     bookings,
+		facilities:   facilities,
+		availability: availability,
+		waitlist:     wl,
+		loc:          loc,
+	}
 }
 
 // parseDate reads ?date=YYYY-MM-DD, defaulting to today in the campus timezone.
@@ -242,6 +250,116 @@ func (h *Handlers) CancelBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	JSON(w, http.StatusOK, toBookingResponse(b))
+}
+
+// ClaimBooking serves POST /api/v1/bookings/:id/claim — accept a promotion
+// offer before it expires. §6.3.
+func (h *Handlers) ClaimBooking(w http.ResponseWriter, r *http.Request) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok {
+		Error(w, r, ErrUnauthenticated)
+		return
+	}
+
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		Error(w, r, fmt.Errorf("%w: booking id must be a UUID", ErrBadRequest))
+		return
+	}
+
+	b, err := h.bookings.Claim(r.Context(), id, p.UserID)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+	JSON(w, http.StatusOK, toBookingResponse(b))
+}
+
+type joinWaitlistRequest struct {
+	FacilityID      string `json:"facility_id"`
+	Start           string `json:"start"`
+	DurationMinutes int    `json:"duration_minutes"`
+}
+
+// waitlistResponse is the wire shape of a queue entry.
+//
+// position is the student's PLACE in the queue — 1 is next — not the bigserial
+// ordering key, which is an implementation detail and would read as a
+// nonsensically large number on screen.
+type waitlistResponse struct {
+	ID         uuid.UUID `json:"id"`
+	FacilityID uuid.UUID `json:"facility_id"`
+	Start      time.Time `json:"start"`
+	End        time.Time `json:"end"`
+	Position   int       `json:"position"`
+	Status     string    `json:"status"`
+}
+
+// JoinWaitlist serves POST /api/v1/waitlist.
+func (h *Handlers) JoinWaitlist(w http.ResponseWriter, r *http.Request) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok {
+		Error(w, r, ErrUnauthenticated)
+		return
+	}
+
+	var req joinWaitlistRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
+		Error(w, r, fmt.Errorf("%w: body must be JSON", ErrBadRequest))
+		return
+	}
+
+	facilityID, err := uuid.Parse(req.FacilityID)
+	if err != nil {
+		Error(w, r, fmt.Errorf("%w: facility_id must be a UUID", ErrBadRequest))
+		return
+	}
+	start, err := time.Parse(time.RFC3339, req.Start)
+	if err != nil {
+		Error(w, r, fmt.Errorf("%w: start must be an RFC3339 timestamp", ErrBadRequest))
+		return
+	}
+	if req.DurationMinutes <= 0 {
+		Error(w, r, fmt.Errorf("%w: duration_minutes must be positive", ErrBadRequest))
+		return
+	}
+
+	entry, err := h.waitlist.Join(r.Context(), p.UserID, facilityID, start,
+		start.Add(time.Duration(req.DurationMinutes)*time.Minute))
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	JSON(w, http.StatusCreated, waitlistResponse{
+		ID:         entry.ID,
+		FacilityID: entry.FacilityID,
+		Start:      entry.Start,
+		End:        entry.End,
+		Position:   entry.Place,
+		Status:     entry.Status,
+	})
+}
+
+// LeaveWaitlist serves DELETE /api/v1/waitlist/:id.
+func (h *Handlers) LeaveWaitlist(w http.ResponseWriter, r *http.Request) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok {
+		Error(w, r, ErrUnauthenticated)
+		return
+	}
+
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		Error(w, r, fmt.Errorf("%w: waitlist id must be a UUID", ErrBadRequest))
+		return
+	}
+
+	if err := h.waitlist.Leave(r.Context(), id, p.UserID); err != nil {
+		Error(w, r, err)
+		return
+	}
+	JSON(w, http.StatusOK, map[string]any{"id": id, "status": "CANCELLED"})
 }
 
 type facilityResponse struct {

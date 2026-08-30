@@ -12,6 +12,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/store"
+	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
@@ -25,7 +26,14 @@ type RouterDeps struct {
 	Bookings     *booking.Service
 	Facilities   *facility.Repo
 	Availability *facility.Availability
-	Logger       *slog.Logger
+
+	// Waitlist is optional. Left nil, the router builds one over the same
+	// database rather than serving a 404 for the queue endpoints — the routes
+	// exist as long as the API does, and a caller that has already wired the
+	// promotion hook passes its own so both halves share one service.
+	Waitlist *waitlist.Service
+
+	Logger *slog.Logger
 }
 
 // NewRouter builds the API.
@@ -59,7 +67,11 @@ func NewRouter(d RouterDeps) http.Handler {
 	if err != nil {
 		loc = time.UTC
 	}
-	h := NewHandlers(d.Bookings, d.Facilities, d.Availability, loc)
+	wl := d.Waitlist
+	if wl == nil {
+		wl = waitlist.NewService(d.DB, d.Facilities, d.Config.PromotionTTL, log)
+	}
+	h := NewHandlers(d.Bookings, d.Facilities, d.Availability, wl, loc)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -100,6 +112,14 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Get("/availability", h.CampusAvailability)
 			r.Get("/bookings/me", h.ListMyBookings)
 			r.Delete("/bookings/{id}", h.CancelBooking)
+
+			// The waitlist half of §6.2/§6.3. None of these is shed: they are
+			// not the contended path, and a student accepting a court that is
+			// already reserved for them must not be turned away by a queue
+			// bound that exists to protect the 6 PM rush.
+			r.Post("/bookings/{id}/claim", h.ClaimBooking)
+			r.Post("/waitlist", h.JoinWaitlist)
+			r.Delete("/waitlist/{id}", h.LeaveWaitlist)
 
 			// The write path, and the only shed route.
 			r.With(

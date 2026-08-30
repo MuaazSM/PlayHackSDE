@@ -48,6 +48,15 @@ var (
 	// success, and it must not claim the booking never existed either.
 	ErrNotCancellable = errors.New("booking is not cancellable")
 
+	// ErrOfferExpired means a waitlist promotion offer could not be claimed:
+	// the claim window closed, the sweeper reclaimed the court, or the booking
+	// was never a live hold. Maps to 409.
+	//
+	// Distinct from ErrNotCancellable because the student did nothing wrong and
+	// the useful next action is different — they should re-join the queue, not
+	// look for a booking that is not there.
+	ErrOfferExpired = errors.New("promotion offer is no longer claimable")
+
 	// ErrValidation means the request was malformed or out of bounds. Maps to
 	// 422. Use ValidationError to carry the offending field.
 	ErrValidation = errors.New("validation failed")

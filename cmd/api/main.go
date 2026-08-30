@@ -16,6 +16,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
 	"github.com/iitg-playhack/sportsbook/internal/store"
+	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 	"github.com/lmittmann/tint"
 	"github.com/redis/go-redis/v9"
 )
@@ -74,8 +75,19 @@ func run(log *slog.Logger) error {
 	// A 409 carries somewhere else to go (§5.3). Replica-only and on a 40 ms
 	// budget, so enriching a rejection can never make it miss M-3; if this
 	// lookup is slow or the replica is unreachable, the conflict ships bare.
+	// The queue, and the cancel path's promotion hook. Both halves share one
+	// service, so the sweeper and a live cancel claim through the same
+	// SKIP LOCKED statement and cannot promote the same student (§6.2).
+	waiting := waitlist.NewService(db, facilities, cfg.PromotionTTL, log)
+
 	bookings := booking.NewService(db, facilities, loc).
-		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay))
+		WithAlternatives(booking.NewAlternatives(db.Replica, availability, cfg.TZDisplay)).
+		WithPromotion(waiting)
+
+	// Run in-process for the demo, as CLAUDE.md allows. It is a ticker and one
+	// short transaction every thirty seconds; giving it its own binary would add
+	// a deployment unit and no capability.
+	go waiting.RunSweeper(ctx, waitlist.SweepInterval)
 
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
@@ -86,6 +98,7 @@ func run(log *slog.Logger) error {
 			Bookings:     bookings,
 			Facilities:   facilities,
 			Availability: availability,
+			Waitlist:     waiting,
 			Logger:       log,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,

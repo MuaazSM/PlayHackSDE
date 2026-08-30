@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 )
 
 // Machine-readable error codes. The client switches on these and never parses
@@ -19,6 +20,9 @@ const (
 	CodeSlotTaken       = "SLOT_TAKEN"
 	CodeCapacityFull    = "CAPACITY_FULL"
 	CodeNotCancellable  = "NOT_CANCELLABLE"
+	CodeOfferExpired    = "OFFER_EXPIRED"
+	CodeAlreadyWaiting  = "ALREADY_WAITING"
+	CodeNotWaiting      = "NOT_WAITING"
 	CodeValidation      = "VALIDATION_FAILED"
 	CodePolicyLimit     = "POLICY_LIMIT"
 	CodeNotFound        = "NOT_FOUND"
@@ -148,6 +152,25 @@ func classify(err error) (status int, code, message string) {
 
 	case errors.Is(err, booking.ErrNotCancellable):
 		return http.StatusConflict, CodeNotCancellable, "That booking is no longer active."
+
+	case errors.Is(err, booking.ErrOfferExpired):
+		return http.StatusConflict, CodeOfferExpired,
+			"That offer has expired — the slot went to the next student in the queue."
+
+	case errors.Is(err, waitlist.ErrAlreadyWaiting):
+		return http.StatusConflict, CodeAlreadyWaiting, "You are already in the queue for that slot."
+
+	case errors.Is(err, waitlist.ErrNotWaiting):
+		return http.StatusConflict, CodeNotWaiting, "That queue entry is no longer waiting."
+
+	case errors.Is(err, waitlist.ErrValidation):
+		return http.StatusUnprocessableEntity, CodeValidation, err.Error()
+
+	case errors.Is(err, waitlist.ErrNotFound):
+		return http.StatusNotFound, CodeNotFound, "Not found."
+
+	case errors.Is(err, waitlist.ErrForbidden):
+		return http.StatusForbidden, CodeForbidden, "That queue entry belongs to someone else."
 
 	case errors.Is(err, booking.ErrPolicyExceeded):
 		return http.StatusUnprocessableEntity, CodePolicyLimit, err.Error()

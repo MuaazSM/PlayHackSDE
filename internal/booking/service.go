@@ -84,6 +84,11 @@ type Service struct {
 	// alts turns a 409 into somewhere else to go (§5.3). Optional: nil means a
 	// bare, still-correct, still-fast conflict. See WithAlternatives.
 	alts *Alternatives
+
+	// promoter offers a cancelled window to the waitlist, inside the cancelling
+	// transaction (§6.2). Optional: nil means a cancel is a plain cancel, which
+	// is exactly what it was before M4. See WithPromotion.
+	promoter Promoter
 }
 
 // NewService wires the write path. loc is the campus timezone, used only to

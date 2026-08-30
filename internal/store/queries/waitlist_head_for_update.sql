@@ -1,3 +1,8 @@
+-- SUPERSEDED by waitlist_claim_head.sql, which is what the promotion path
+-- actually runs. This is the M0 sketch of the same statement, kept because it
+-- is the shape §6.2 prints; if the two ever disagree, waitlist_claim_head.sql
+-- is the one that decides who gets promoted.
+--
 -- The second concurrency proof. IMPLEMENTATION.md §6.2.
 --
 -- SKIP LOCKED so that concurrent cancellations promote DIFFERENT students
