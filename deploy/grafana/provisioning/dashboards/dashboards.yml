@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: playhack
+    type: file
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      # docker-compose mounts deploy/grafana/surge.json here.
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

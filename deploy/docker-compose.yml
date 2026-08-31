@@ -73,44 +73,97 @@ services:
       timeout: 3s
       retries: 30
 
-  # --- Phase 15 stubs. Uncomment when M3/M5 land; do not let these block M0. ---
+  # --- M5 observability. `make dev` brings these up with the rest. ------------
   #
-  # postgres-replica:
-  #   image: postgres:16-alpine
-  #   container_name: playhack-postgres-replica
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   environment:
-  #     PGUSER: replicator
-  #     PGPASSWORD: replicator
-  #   ports:
-  #     - "${REPLICA_HOST_PORT:-5433}:5432"
-  #   volumes:
-  #     - pgdata_replica:/var/lib/postgresql/data
-  #   # Streaming replica: pg_basebackup from the primary, then start read-only.
-  #   # Availability reads point at DB_REPLICA_URL, which falls back to DB_URL.
+  # Neither one is on the booking path. Prometheus scrapes, Grafana draws, and if
+  # both are down the API is exactly as correct — which is the only reason they
+  # are allowed to be here at all on a demo stack that must not depend on the
+  # network.
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: playhack-prometheus
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # The API runs on the HOST (`make run`), not in this compose file, so the
+    # scrape target has to leave the bridge network. Docker Desktop resolves
+    # host.docker.internal; this alias makes the same name work on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: playhack-grafana
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: playhack
+      # Anonymous viewing, at Admin. This is a laptop demo behind a projector:
+      # a login prompt between the judge and the surge dashboard is friction with
+      # no threat model behind it.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_DEFAULT_THEME: dark
+      # Open straight on the surge board. uid is pinned in surge.json.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/surge.json
+    ports:
+      - "${GRAFANA_HOST_PORT:-3001}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/surge.json:/var/lib/grafana/dashboards/surge.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- The read/write split. OPT-IN: `make dev-replica`. ----------------------
   #
-  # prometheus:
-  #   image: prom/prometheus:latest
-  #   container_name: playhack-prometheus
-  #   ports:
-  #     - "9090:9090"
-  #   volumes:
-  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-  #
-  # grafana:
-  #   image: grafana/grafana:latest
-  #   container_name: playhack-grafana
-  #   depends_on: [prometheus]
-  #   environment:
-  #     GF_SECURITY_ADMIN_PASSWORD: playhack
-  #     GF_AUTH_ANONYMOUS_ENABLED: "true"
-  #   ports:
-  #     - "3001:3000"
-  #   volumes:
-  #     - ./grafana:/etc/grafana/provisioning:ro
+  # Behind a profile on purpose. IMPLEMENTATION.md §2.1 calls the replica a
+  # nice-to-have that proves the split and must not block anything, and
+  # DB_REPLICA_URL falls back to DB_URL — so a replica that will not come up
+  # degrades to "works, just not split". Putting it in the default `up` would
+  # invert that: a broken pg_basebackup would then be able to make `make dev`
+  # look failed, which is exactly the dependency the demo must not have.
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: playhack-postgres-replica
+    profiles: ["replica"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: playhack
+      PGDATA: /var/lib/postgresql/data/pgdata
+    user: postgres
+    ports:
+      - "${REPLICA_HOST_PORT:-5433}:5432"
+    volumes:
+      - pgdata_replica:/var/lib/postgresql/data
+    # Streaming replica: pg_basebackup from the primary once, then start read-only.
+    # -R writes standby.signal and primary_conninfo, which is what makes this a
+    # standby rather than a second independent database — the distinction matters,
+    # because the second kind would accept writes and silently diverge.
+    #
+    # entrypoint, not command: the postgres image's entrypoint would try to
+    # initdb an empty PGDATA before the basebackup ever ran.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          rm -rf "$$PGDATA"
+          until pg_basebackup -h postgres -p 5432 -U playhack -D "$$PGDATA" -Fp -Xs -R -w; do
+            echo "waiting for primary..."; sleep 2
+          done
+          chmod 0700 "$$PGDATA"
+        fi
+        exec postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U playhack -d playhack"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   pgdata:
-  # pgdata_replica:
+  pgdata_replica:

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iitg-playhack/sportsbook/internal/observability"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -124,6 +125,8 @@ func (a *Availability) WithTTL(ttl time.Duration) *Availability {
 // the one place a student most wants the truth rather than a five-second-old
 // version of it.
 func (a *Availability) ForFacility(ctx context.Context, f *Facility, date string) (*DayAvailability, error) {
+	defer observability.ObserveSince(time.Now())
+
 	query := queries.AvailabilityFacility
 	if !f.IsExclusive {
 		query = queries.AvailabilityShared
@@ -163,6 +166,11 @@ func (a *Availability) ForFacility(ctx context.Context, f *Facility, date string
 // a Postgres fallback would make a cache outage a feature outage; here it is a
 // latency change nobody notices.
 func (a *Availability) Campus(ctx context.Context, date string) (*CampusGrid, error) {
+	// Timed including cache hits, deliberately. availability_query_duration_seconds
+	// is what a student's grid costs, and excluding the hits would report the
+	// p99 of the slow path as the p99 of the endpoint.
+	defer observability.ObserveSince(time.Now())
+
 	key := campusKey(date)
 
 	if grid, ok := a.fromCache(ctx, key); ok {

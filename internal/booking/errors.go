@@ -62,6 +62,26 @@ var (
 	ErrValidation = errors.New("validation failed")
 )
 
+// takenError is a lost race that still knows which SQLSTATE decided it.
+//
+// §14 requires the write-path log line to carry the code, and by the time httpx
+// sees a conflict the driver error has been translated twice — store.Classify to
+// store.ErrSlotTaken, then this package to ErrSlotTaken — so without this the
+// field is always empty on the one outcome anybody wants it for.
+//
+// Two unwrap targets, the same shape store.Error and policyError use: errors.Is
+// finds ErrSlotTaken exactly as before, and errors.As still reaches
+// *pgconn.PgError so store.SQLState can print 23P01. Error() is deliberately the
+// bare domain message — a student is never shown a constraint name.
+//
+// This does not make the SQLSTATE a decision anywhere. Nothing outside
+// store/pgerr.go may branch on it; see store.SQLState.
+type takenError struct{ cause error }
+
+func (e *takenError) Error() string { return ErrSlotTaken.Error() }
+
+func (e *takenError) Unwrap() []error { return []error{ErrSlotTaken, e.cause} }
+
 // policyError carries a fair-use refusal from internal/policy into this
 // package's vocabulary without flattening it.
 //

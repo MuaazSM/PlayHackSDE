@@ -27,15 +27,15 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/live"
+	"github.com/iitg-playhack/sportsbook/internal/observability"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
-	"github.com/lmittmann/tint"
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	log := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
+	log := observability.NewLogger(os.Stderr, slog.LevelInfo)
 	slog.SetDefault(log)
 
 	if err := run(log); err != nil {

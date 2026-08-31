@@ -1,0 +1,21 @@
+# Prometheus for the "6 PM Surge" board. IMPLEMENTATION.md §14.
+#
+# One target. This is a single Go binary on a laptop, and a service-discovery
+# config for it would be theatre.
+global:
+  # 2s, not the usual 15s. The whole event this dashboard exists to show lasts
+  # a few seconds; at 15s the surge is one data point and the graph is a flat
+  # line with a bump. The cost is trivial at eight metrics.
+  scrape_interval: 2s
+  scrape_timeout: 1s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: playhack-api
+    metrics_path: /metrics
+    static_configs:
+      # The API runs on the host (`make run`), not in compose — see the
+      # extra_hosts alias in docker-compose.yml.
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          service: api

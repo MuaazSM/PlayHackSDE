@@ -82,6 +82,11 @@ const (
 	OutboxMarkFailed      = "outbox_mark_failed"
 	OutboxRequeueFailed   = "outbox_requeue_failed"
 	OutboxListen          = "outbox_listen"
+	OutboxPending         = "outbox_pending"
+
+	// Observability (§14). Gauge inputs, sampled on a ticker — never on a
+	// request path.
+	ReplicaLag = "replica_lag"
 
 	// The race console (§13). DemoCountConfirmed is the proof; the rest is
 	// stage management.
@@ -142,6 +147,8 @@ var required = []string{
 	OutboxMarkFailed,
 	OutboxRequeueFailed,
 	OutboxListen,
+	OutboxPending,
+	ReplicaLag,
 	DemoCountConfirmed,
 	DemoResetSlot,
 	DemoBookers,

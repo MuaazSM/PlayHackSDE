@@ -56,3 +56,35 @@ jobs:
       # overbooked court. Runners provide Docker, which testcontainers needs.
       - name: Tests
         run: go test ./... -race -timeout 20m
+
+  # The 6 PM surge profile: 500 VUs at one slot, with the p99 budgets as failing
+  # thresholds (IMPLEMENTATION.md §14).
+  #
+  # NON-BLOCKING, on purpose. The numbers depend on the machine underneath, and a
+  # shared GitHub runner is not the machine the demo runs on — gating merges on
+  # its timing would train everybody to re-run CI until it went green, which is
+  # worse than not gating at all. The job still runs, and its output is still the
+  # place to read what the write path cost on a known box.
+  #
+  # The budgets ARE enforced, on hardware that means something, by
+  # TestLoadProfile_ThresholdsPass in the blocking job above and by `make load`
+  # before a demo.
+  load:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: false
+
+      - name: Refuse toolchain upgrades
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      # Not -race: the detector multiplies per-request cost, and a percentile
+      # measured under it describes the detector.
+      - name: Load profile
+        run: go test ./test/load/... -run TestLoadProfile -v -timeout 15m

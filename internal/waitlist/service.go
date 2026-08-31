@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/observability"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/policy"
 	"github.com/iitg-playhack/sportsbook/internal/store"
@@ -332,22 +333,33 @@ func (s *Service) promote(ctx context.Context, tx pgx.Tx, facilityID uuid.UUID, 
 		switch {
 		case errors.Is(err, errNobodyWaiting):
 			// An empty queue is the common case. A cancel is then a plain cancel.
+			observability.RecordPromotion(observability.PromotionEmpty)
 			return nil, nil
 
 		case errors.Is(err, store.ErrSlotTaken):
 			// Another cancel's promotion, or a booking that slipped in, already
 			// covers this window. The exclusion constraint said so, which is the
 			// only authority that could. The entry stays WAITING.
+			observability.RecordPromotion(observability.PromotionLost)
 			s.log.InfoContext(ctx, "waitlist promotion lost the freed window",
 				"facility_id", facilityID, "start", start)
 			return nil, nil
 		}
+		observability.RecordPromotion(observability.PromotionError)
 		return nil, err
 	}
 
 	if err := sp.Commit(ctx); err != nil { // RELEASE SAVEPOINT
+		observability.RecordPromotion(observability.PromotionError)
 		return nil, fmt.Errorf("waitlist: release savepoint: %w", err)
 	}
+
+	// Counted after RELEASE SAVEPOINT, not after the caller's COMMIT — the
+	// promotion is not this package's to commit. A cancel that then fails to
+	// commit rolls the hold back with it and leaves one over-count behind; the
+	// alternative is a counter that never fires for the common case, which is
+	// worse for a metric whose job is to show the SKIP LOCKED fan-out working.
+	observability.RecordPromotion(observability.PromotionPromoted)
 	return promotion, nil
 }
 

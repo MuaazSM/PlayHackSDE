@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iitg-playhack/sportsbook/internal/observability"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/store/queries"
 	"github.com/jackc/pgx/v5"
@@ -338,9 +339,29 @@ func (d *Dispatcher) pass(ctx context.Context) {
 		// A short batch means the queue is empty. A full one means there is
 		// probably more behind it.
 		if n < d.batch {
+			d.sampleBacklog(ctx)
 			return
 		}
 	}
+	d.sampleBacklog(ctx)
+}
+
+// sampleBacklog publishes outbox_pending (§14).
+//
+// Once per pass, at the END of it, so the gauge reads what is still waiting
+// rather than what arrived. Best effort and never fatal: this is a dashboard
+// input, and a dispatcher that stopped draining because it could not count is
+// the failure the gauge exists to reveal.
+func (d *Dispatcher) sampleBacklog(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	var pending int64
+	if err := d.db.Primary.QueryRow(ctx, queries.Get(queries.OutboxPending)).Scan(&pending); err != nil {
+		d.log.Debug("outbox backlog sample failed", "err", err)
+		return
+	}
+	observability.SetOutboxPending(pending)
 }
 
 // drainOnce claims one batch, commits, and only then sends.
@@ -491,6 +512,7 @@ func (d *Dispatcher) DrainNow(ctx context.Context) error {
 			return err
 		}
 		if n < d.batch {
+			d.sampleBacklog(ctx)
 			return nil
 		}
 	}

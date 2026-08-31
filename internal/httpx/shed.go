@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/iitg-playhack/sportsbook/internal/booking"
+	"github.com/iitg-playhack/sportsbook/internal/observability"
 )
 
 // Shedder bounds the number of booking writes in flight and rejects the rest
@@ -64,10 +65,18 @@ func NewShedder(depth int, timeout time.Duration) *Shedder {
 func (s *Shedder) Do(ctx context.Context, fn func(context.Context) error) error {
 	select {
 	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
+		defer func() {
+			<-s.slots
+			observability.SetWriteQueueDepth(len(s.slots))
+		}()
 		s.admitted.Add(1)
+		// write_queue_depth is occupancy, not the bound (§14). Published from
+		// here rather than sampled on a ticker because a burst that fills and
+		// drains the queue between two scrapes is exactly the event worth seeing.
+		observability.SetWriteQueueDepth(len(s.slots))
 	default:
 		s.shed.Add(1)
+		observability.RecordShed()
 		return booking.ErrShed
 	}
 

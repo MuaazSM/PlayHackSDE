@@ -483,7 +483,9 @@ func (s *Service) attemptExclusive(ctx context.Context, f *facility.Facility, re
 				return existing, nil
 			}
 		}
-		return nil, ErrSlotTaken
+		// Wrapped, not bare, so the SQLSTATE survives to the log line. The
+		// verdict is unchanged: errors.Is(err, ErrSlotTaken) still holds.
+		return nil, &takenError{cause: txErr}
 
 	case errors.Is(txErr, store.ErrTimeout):
 		return nil, fmt.Errorf("booking: %w", context.DeadlineExceeded)

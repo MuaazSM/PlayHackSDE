@@ -23,6 +23,37 @@ DB_MIGRATE_URL ?= postgres://playhack:playhack@localhost:$(POSTGRES_HOST_PORT)/p
 # to its 5s ticker and nobody would be told why.
 DB_LISTEN_URL  ?= $(DB_MIGRATE_URL)
 REDIS_URL      ?= redis://localhost:$(REDIS_HOST_PORT)
+# The read/write split. Empty means availability reads fall back to the primary,
+# which is a supported configuration and not a degraded one — IMPLEMENTATION.md
+# §2.1. `make dev-replica` brings the standby up and this is what points at it:
+#   DB_REPLICA_URL=postgres://playhack:playhack@localhost:5433/playhack?sslmode=disable make run
+DB_REPLICA_URL ?=
+
+# WRITE_QUEUE_DEPTH, measured on THIS hardware rather than assumed.
+#
+# internal/config.DefaultWriteQueueDepth is 128, tuned on a container Postgres
+# with the durability turned down. Through PgBouncer against the compose stack a
+# booking transaction costs several times more, and the bound has to come down
+# with it — the depth is a per-environment number by construction (see the sweep
+# table on that constant), not a property of the code.
+#
+# `make load`, n=500, one contended slot, on this laptop:
+#
+#   depth   409s   409 p99 (repeat runs)
+#      16     15   103.5ms
+#      24     23   113.2ms  85.0ms  96.6ms
+#      32     31    88.3ms  91.8ms  110.2ms  130.0ms  138.6ms
+#      48     47   147.7ms
+#      64     63   142.9ms
+#     128    127   368.7ms                            <- misses the budget outright
+#
+# 24 is the pick. 48 and 64 "pass" by a hair, which is not passing — the next
+# run's noise takes them over. 32 passes every time but drifts as high as
+# 139ms, which is inside the target and outside the ~25% margin the constant's
+# own note asks for. The price of 24 over 32 is eight more students out of five
+# hundred getting a fast 429 instead of a slow 409, and both of them lost.
+WRITE_QUEUE_DEPTH ?= 24
+export WRITE_QUEUE_DEPTH
 
 # Use the migrate CLI if it is installed; otherwise run it straight from the
 # module deps so a fresh clone needs no extra install step.
@@ -30,7 +61,7 @@ MIGRATE := $(shell command -v migrate 2>/dev/null || echo "go run -tags 'postgre
 
 N ?= 500
 
-.PHONY: dev down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset lint tidy psql
+.PHONY: dev dev-replica down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset load lint tidy psql
 
 ## dev: bring up postgres, pgbouncer, redis and wait for health
 dev:
@@ -44,6 +75,15 @@ dev:
 	  sleep 1; \
 	done
 	@$(COMPOSE) ps
+
+## dev-replica: additionally bring up the streaming standby on :5433.
+##
+## Opt-in. §2.1 calls the replica a nice-to-have that must not block anything,
+## and DB_REPLICA_URL falls back to DB_URL — so a standby that will not come up
+## costs the read/write split and nothing else.
+dev-replica: dev
+	$(COMPOSE) --profile replica up -d postgres-replica
+	@$(COMPOSE) --profile replica ps
 
 ## down: stop the stack (keeps the volume)
 down:
@@ -70,7 +110,7 @@ seed:
 
 ## run: API on :8080
 run:
-	DB_URL="$(DB_URL)" DB_LISTEN_URL="$(DB_LISTEN_URL)" REDIS_URL="$(REDIS_URL)" go run ./cmd/api
+	DB_URL="$(DB_URL)" DB_REPLICA_URL="$(DB_REPLICA_URL)" WRITE_QUEUE_DEPTH="$(WRITE_QUEUE_DEPTH)" DB_LISTEN_URL="$(DB_LISTEN_URL)" REDIS_URL="$(REDIS_URL)" go run ./cmd/api
 
 ## worker: outbox dispatcher + sweepers as a separate process. Not needed for
 ## the demo — `make run` embeds them (EMBED_WORKERS defaults to true).
@@ -96,6 +136,20 @@ race-demo:
 ## race-reset: clear the demo slot without racing
 race-reset:
 	DB_URL="$(DB_URL)" go run ./cmd/racedemo -reset-only
+
+## load: the 6 PM surge, as a pass/fail gate. IMPLEMENTATION.md §14, PRD §8.2.
+##
+## N virtual users at ONE slot, over real HTTP through the whole middleware
+## chain. Exits non-zero if p99(409) >= 150ms, p99(201) >= 250ms, or anything
+## returned 5xx. Needs only the compose Postgres: the API is started in-process
+## on a loopback port, so there is no k6, no vegeta and no host dependency to
+## install at a venue.
+##
+##   make load N=500
+##   make load LOAD_ARGS=-json
+##   make load LOAD_ARGS="-url http://localhost:8080"   # against a running API
+load:
+	DB_URL="$(DB_URL)" DB_REPLICA_URL="$(DB_REPLICA_URL)" WRITE_QUEUE_DEPTH="$(WRITE_QUEUE_DEPTH)" go run ./test/load -n $(N) $(LOAD_ARGS)
 
 lint:
 	golangci-lint run

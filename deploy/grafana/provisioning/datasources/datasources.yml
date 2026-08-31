@@ -1,0 +1,25 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: playhack-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  # The fourth panel of the surge board is a COUNT FROM THE BOOKINGS TABLE, not a
+  # metric. That is the entire point of it: a Prometheus counter showing 1 proves
+  # the application counted to 1, while this proves the database contains one row.
+  # Under a demo about a database constraint, only the second is evidence.
+  - name: Postgres
+    uid: playhack-pg
+    type: postgres
+    url: postgres:5432
+    user: playhack
+    database: playhack
+    secureJsonData:
+      password: playhack
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600

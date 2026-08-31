@@ -1,9 +1,11 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -11,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
+	"github.com/iitg-playhack/sportsbook/internal/observability"
+	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
 )
 
@@ -186,9 +190,11 @@ func (h *Handlers) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		IdemKey:    idemKey,
 	})
 	if err != nil {
+		h.recordWriteOutcome(r, facilityID, err)
 		Error(w, r, err)
 		return
 	}
+	h.recordWriteOutcome(r, facilityID, nil)
 
 	// A replay is a success the client already has. 200 with the original body
 	// lets it tell "you booked this now" from "you had already booked this".
@@ -197,6 +203,68 @@ func (h *Handlers) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	JSON(w, status, toBookingResponse(b))
+}
+
+// recordWriteOutcome is the §14 half of the write path: the per-facility
+// conflict counter, and the one log line that carries outcome and SQLSTATE.
+//
+// It lives here rather than in the Metrics middleware because the middleware
+// sees a status code and nothing else — it cannot name the facility that lost,
+// which is the whole point of booking_conflicts_total{facility}. The latency
+// histogram stays at the edge, where the budget is; only the label that needs
+// domain knowledge comes from in here.
+//
+// Not a business decision, so it does not violate the thin-handler rule: nothing
+// below changes what the client is told.
+func (h *Handlers) recordWriteOutcome(r *http.Request, facilityID uuid.UUID, err error) {
+	ctx := r.Context()
+	log := slog.Default()
+
+	if err == nil {
+		log.InfoContext(ctx, "booking write",
+			"outcome", observability.OutcomeConfirmed,
+			"facility_id", facilityID)
+		return
+	}
+
+	conflict := errors.Is(err, booking.ErrSlotTaken) || errors.Is(err, booking.ErrCapacityFull)
+	if conflict {
+		observability.RecordConflict(h.facilityLabel(ctx, facilityID))
+	}
+
+	outcome := "rejected"
+	switch {
+	case conflict:
+		outcome = observability.OutcomeConflict
+	case errors.Is(err, booking.ErrShed):
+		outcome = observability.OutcomeShed
+	}
+
+	// SQLSTATE is printed, never branched on — see store.SQLState. Empty for a
+	// validation failure or a shed, which never reached the database.
+	log.InfoContext(ctx, "booking write",
+		"outcome", outcome,
+		"facility_id", facilityID,
+		"sqlstate", store.SQLState(err),
+		"err", err)
+}
+
+// facilityLabel resolves a facility name for the conflict counter, falling back
+// to the id.
+//
+// The catalogue is an in-process TTL cache, so on the contended path this is
+// free. If it is not — a cold cache during the first conflict of a burst — the
+// id is a perfectly good label and a metric must never spend a rejection's
+// latency budget looking prettier.
+func (h *Handlers) facilityLabel(ctx context.Context, id uuid.UUID) string {
+	if h.facilities == nil {
+		return id.String()
+	}
+	f, err := h.facilities.Get(ctx, id)
+	if err != nil || f.Name == "" {
+		return id.String()
+	}
+	return f.Name
 }
 
 // ListMyBookings serves GET /api/v1/bookings/me.

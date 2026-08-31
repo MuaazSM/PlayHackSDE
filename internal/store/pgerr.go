@@ -184,3 +184,23 @@ func IsClassified(err error) bool {
 	var e *Error
 	return errors.As(err, &e)
 }
+
+// SQLState returns the SQLSTATE behind err, or "" when there is not one.
+//
+// This is the ONE sanctioned way a SQLSTATE leaves this file, and it exists for
+// exactly one caller: the write-path log line, which §14 requires to carry the
+// code. It is a string to print, never a string to branch on. Nothing outside
+// this file may compare the result — behaviour is decided by errors.Is against
+// the sentinels above, and a switch on this return value would put the mapping
+// in two places and eventually in disagreement.
+func SQLState(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}

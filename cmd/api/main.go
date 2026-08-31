@@ -17,16 +17,16 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
 	"github.com/iitg-playhack/sportsbook/internal/live"
+	"github.com/iitg-playhack/sportsbook/internal/observability"
 	"github.com/iitg-playhack/sportsbook/internal/outbox"
 	"github.com/iitg-playhack/sportsbook/internal/policy"
 	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/internal/waitlist"
-	"github.com/lmittmann/tint"
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	log := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
+	log := observability.NewLogger(os.Stderr, slog.LevelInfo)
 	slog.SetDefault(log)
 
 	if err := run(log); err != nil {
@@ -57,6 +57,13 @@ func run(log *slog.Logger) error {
 	log.Info("database connected",
 		"max_conns", cfg.DBMaxConns,
 		"dedicated_replica", db.HasDedicatedReplica())
+
+	// replica_lag_seconds (§14). With DB_REPLICA_URL unset this publishes a flat
+	// zero and returns — availability is then served by the primary and cannot be
+	// stale. A failed replica setup degrades to "works, just not split"; it never
+	// blocks the API (§2.1).
+	go observability.SampleReplicaLag(ctx, db.Replica, db.HasDedicatedReplica(),
+		observability.ReplicaLagInterval, log)
 
 	// Redis is optional by design. Rate limiting fails open and nothing on the
 	// booking path is authoritative here, so a Redis that will not connect

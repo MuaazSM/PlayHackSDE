@@ -1,0 +1,189 @@
+{
+  "uid": "playhack-surge",
+  "title": "6 PM Surge",
+  "description": "One screen. Write p99 split by outcome, conflict rate, queue depth, and the database's own count of confirmed bookings for the hottest slot — which stays at 1.",
+  "tags": ["playhack", "contention"],
+  "timezone": "Asia/Kolkata",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "2s",
+  "time": { "from": "now-5m", "to": "now" },
+  "timepicker": { "refresh_intervals": ["1s", "2s", "5s", "10s", "30s"] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Write p99 by outcome",
+      "description": "Losing must be faster than winning. The conflict line is the one with the tighter budget: p99 < 150 ms, against 250 ms for a confirmation. At peak most users are on the red line, which is why it gets the tighter target.",
+      "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "conflict" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "confirmed" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "shed" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, outcome) (rate(booking_write_duration_seconds_bucket[30s])))",
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Conflict rate by facility",
+      "description": "Lost races per second, per facility. At 18:00 one line lifts off the floor and the rest stay at zero — that line is the contended court, and it is the whole reason this system is built the way it is.",
+      "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": { "lineWidth": 2, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+          "editorMode": "code",
+          "expr": "sum by (facility) (rate(booking_conflicts_total[30s]))",
+          "legendFormat": "{{facility}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+          "editorMode": "code",
+          "expr": "rate(booking_shed_total[30s])",
+          "legendFormat": "shed",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Write queue depth",
+      "description": "Writes in flight against the WRITE_QUEUE_DEPTH bound (128). Pinned at the bound means the shedder is doing its job; the shed rate next door is the other half of the same picture.",
+      "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "dashed" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 128 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "playhack-prom" },
+          "editorMode": "code",
+          "expr": "write_queue_depth",
+          "legendFormat": "in flight",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Confirmed bookings for the hottest slot  —  SELECT count(*) FROM bookings",
+      "description": "Not a metric. This is a COUNT against the bookings table itself, through a Postgres datasource: it counts confirmed rows for whichever (facility, window) has the most today, which during the race is the contended slot. Five hundred requests arrive, the graph above erupts, and this line does not move off 1. A Prometheus counter reading 1 would only prove the application counted to 1; this proves the database contains one row, which is the claim actually being made.",
+      "datasource": { "type": "postgres", "uid": "playhack-pg" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 4,
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 4,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "playhack-pg" },
+          "format": "time_series",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS \"time\", COALESCE(max(c), 0)::float8 AS \"confirmed rows, hottest slot\" FROM (SELECT count(*) AS c FROM bookings WHERE status IN ('CONFIRMED', 'BLOCKED') AND lower(during) >= date_trunc('day', now()) GROUP BY facility_id, during) s;"
+        }
+      ]
+    }
+  ]
+}
