@@ -29,15 +29,18 @@ func TestValidation_PastSlot(t *testing.T) {
 	court := testutil.CourtID()
 	testutil.WarmCatalogue(t, cat, court)
 
-	yesterday, _ := testutil.Slot(18, time.Hour)
-	yesterday = yesterday.Add(-24 * time.Hour)
+	// Slot fixtures are tomorrow by default so they remain valid for daytime
+	// runs. Move this one three days back explicitly because this test is about a
+	// past request, not about the fixture helper's default date.
+	past, _ := testutil.Slot(18, time.Hour)
+	past = past.Add(-72 * time.Hour)
 
 	counter.Reset()
 
 	_, err := svc.Create(context.Background(), booking.CreateRequest{
 		FacilityID: court,
 		UserID:     testutil.StudentID(0),
-		Start:      yesterday,
+		Start:      past,
 		Duration:   time.Hour,
 		IdemKey:    uuid.NewString(),
 	})

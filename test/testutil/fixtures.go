@@ -16,6 +16,11 @@ import (
 // mean the slot a student would actually see.
 var IST = time.FixedZone("IST", 5*60*60+30*60)
 
+// slotDay is captured once when the test process starts. Using one process-wide
+// fixture date keeps a long suite coherent if it crosses local midnight, while
+// still keeping ordinary booking fixtures in the future.
+var slotDay = time.Now().In(IST).AddDate(0, 0, 1)
+
 // Seeded facilities. Reset re-applies the seed before every test, so these ids
 // are always present and always the same.
 func CourtID() uuid.UUID  { return facilityID("tennis-court-1") } // exclusive
@@ -116,17 +121,24 @@ func (p *PG) Facility(t *testing.T, sport string, exclusive bool, capacity int) 
 	return id
 }
 
-// Slot returns [start, end) for today at the given IST hour, in UTC.
+// Slot returns [start, end) for tomorrow at the given IST hour, in UTC.
+//
+// Ordinary booking fixtures must be in the future regardless of when the
+// suite runs. Keeping the date one day ahead preserves the campus-local date
+// and hour semantics while avoiding the evening failures caused by anchoring
+// every fixture to today.
 //
 // Half-open by construction, matching the '[)' bounds the schema relies on:
 // 18:00-19:00 and 19:00-20:00 must not overlap.
 func Slot(hour int, duration time.Duration) (start, end time.Time) {
-	now := time.Now().In(IST)
-	start = time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, IST).UTC()
+	start = time.Date(slotDay.Year(), slotDay.Month(), slotDay.Day(), hour, 0, 0, 0, IST).UTC()
 	return start, start.Add(duration)
 }
 
-// Slot18 is the contended slot: today at 18:00 IST for one hour. This is the
+// SlotDate returns the campus-local date used by Slot fixtures.
+func SlotDate() string { return slotDay.Format("2006-01-02") }
+
+// Slot18 is the contended slot: tomorrow at 18:00 IST for one hour. This is the
 // one every race test fights over.
 func Slot18() (start, end time.Time) { return Slot(18, time.Hour) }
 

@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +80,9 @@ func runCLI(t *testing.T, dsn string, args ...string) (string, error) {
 
 	root := repoRoot(t)
 	bin := filepath.Join(t.TempDir(), "racedemo")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 
 	build := exec.Command("go", "build", "-o", bin, "./cmd/racedemo")
 	build.Dir = root
@@ -104,18 +109,21 @@ func packageImports(t *testing.T, pkgDir string) []string {
 	t.Helper()
 
 	dir := filepath.Join(repoRoot(t), filepath.FromSlash(pkgDir))
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ImportsOnly)
+	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 
+	fset := token.NewFileSet()
 	var out []string
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, imp := range file.Imports {
-				path, err := strconv.Unquote(imp.Path.Value)
-				require.NoError(t, err)
-				out = append(out, path)
-			}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, parser.ImportsOnly)
+		require.NoError(t, err)
+		for _, imp := range file.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			require.NoError(t, err)
+			out = append(out, path)
 		}
 	}
 	require.NotEmpty(t, out, "expected %s to import something", pkgDir)

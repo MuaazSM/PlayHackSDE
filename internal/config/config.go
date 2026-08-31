@@ -6,6 +6,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,19 +21,15 @@ import (
 // request serialises behind the per-facility advisory lock, so conflict latency
 // grows roughly linearly with depth while shed requests stay free.
 //
-// Measured by TestDepthSweep_Diagnostic at n=500 on one contended slot:
+// The end-to-end compose measurements in the Makefile select 24. Keeping a
+// different code default made direct `go run ./cmd/api` silently use the known
+// slow 128-depth profile and invalidated the rejection-latency guarantee unless
+// callers happened to start the service through Make.
 //
-//	depth   admitted   shed   409 p99    429 p99
-//	   16         16    484     10ms       333ns
-//	  128        128    372     54ms       292ns
-//	  300        300    200    121ms       292ns
-//	  500        500      0    195ms          —
-//
-// 128 gives roughly 3x headroom against the p99 < 150ms rejection target while
-// cutting shedding from 87% to ~74%. Re-run the sweep on the demo hardware
-// during M5 rehearsal and pin the largest depth that clears 150ms with ~25%
-// margin.
-const DefaultWriteQueueDepth = 128
+// This remains environment-overridable, but the safe default is the profile
+// with measured margin rather than the largest value observed in a faster test
+// container.
+const DefaultWriteQueueDepth = 24
 
 // AuthMode selects between real OIDC and the dev login shortcut.
 type AuthMode string
@@ -115,11 +113,29 @@ type Config struct {
 	// HTTP
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
+
+	// TrustedProxyCIDRs identifies reverse proxies that are allowed to supply
+	// X-Forwarded-For. An empty list is intentionally the safe default: direct
+	// clients cannot spoof the address used by the IP rate limiter.
+	TrustedProxyCIDRs []string
 }
 
 // Load reads the environment into a Config and validates it. It is the only
 // place in the codebase that reads environment variables.
 func Load() (*Config, error) {
+	authMode := AuthMode(strings.ToLower(env("AUTH_MODE", "dev")))
+	jwtSecret := env("JWT_SECRET", "")
+	checkinSecret := env("CHECKIN_HMAC_SECRET", "")
+	// Development is the only mode in which predictable local-only secrets are
+	// acceptable. Production/OIDC must never silently inherit them.
+	if authMode == AuthModeDev {
+		if jwtSecret == "" {
+			jwtSecret = "dev-secret-not-for-production"
+		}
+		if checkinSecret == "" {
+			checkinSecret = "dev-checkin-secret"
+		}
+	}
 	c := &Config{
 		DBURL:             env("DB_URL", "postgres://playhack:playhack@localhost:6432/playhack?sslmode=disable"),
 		DBReplicaURL:      env("DB_REPLICA_URL", ""),
@@ -130,14 +146,15 @@ func Load() (*Config, error) {
 		VAPIDSubject:      env("VAPID_SUBJECT", ""),
 		EmailFrom:         env("EMAIL_FROM", ""),
 		RedisURL:          env("REDIS_URL", "redis://localhost:6379"),
-		AuthMode:          AuthMode(strings.ToLower(env("AUTH_MODE", "dev"))),
-		JWTSecret:         env("JWT_SECRET", "dev-secret-not-for-production"),
+		AuthMode:          authMode,
+		JWTSecret:         jwtSecret,
 		OIDCIssuer:        env("OIDC_ISSUER", ""),
 		OIDCClientID:      env("OIDC_CLIENT_ID", ""),
 		OIDCClientSecret:  env("OIDC_CLIENT_SECRET", ""),
-		CheckinHMACSecret: env("CHECKIN_HMAC_SECRET", "dev-checkin-secret"),
+		CheckinHMACSecret: checkinSecret,
 		TZDisplay:         env("TZ_DISPLAY", "Asia/Kolkata"),
 		HTTPAddr:          env("HTTP_ADDR", ":8080"),
+		TrustedProxyCIDRs: envCSV("TRUSTED_PROXY_CIDRS"),
 	}
 
 	var err error
@@ -198,9 +215,25 @@ func (c *Config) validate() error {
 		if c.OIDCIssuer == "" || c.OIDCClientID == "" {
 			return fmt.Errorf("config: AUTH_MODE=oidc requires OIDC_ISSUER and OIDC_CLIENT_ID")
 		}
+		if err := validateOIDCIssuer(c.OIDCIssuer); err != nil {
+			return err
+		}
 	case AuthModeDev:
+		if strings.TrimSpace(c.JWTSecret) == "" {
+			return fmt.Errorf("config: AUTH_MODE=dev requires JWT_SECRET")
+		}
 	default:
 		return fmt.Errorf("config: AUTH_MODE must be %q or %q, got %q", AuthModeOIDC, AuthModeDev, c.AuthMode)
+	}
+	if c.AuthMode != AuthModeDev {
+		for name, value := range map[string]string{
+			"JWT_SECRET":          c.JWTSecret,
+			"CHECKIN_HMAC_SECRET": c.CheckinHMACSecret,
+		} {
+			if value == "dev-secret-not-for-production" || value == "dev-checkin-secret" {
+				return fmt.Errorf("config: %s contains a development-only default outside AUTH_MODE=dev", name)
+			}
+		}
 	}
 	if c.DBMaxConns < 1 {
 		return fmt.Errorf("config: DB_MAX_CONNS must be >= 1, got %d", c.DBMaxConns)
@@ -211,12 +244,33 @@ func (c *Config) validate() error {
 	if _, err := time.LoadLocation(c.TZDisplay); err != nil {
 		return fmt.Errorf("config: TZ_DISPLAY %q is not a known location: %w", c.TZDisplay, err)
 	}
+	for _, cidr := range c.TrustedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("config: TRUSTED_PROXY_CIDRS contains invalid CIDR %q: %w", cidr, err)
+		}
+	}
 	switch c.NotifierKind {
 	case "log", "webpush", "email":
 	default:
 		return fmt.Errorf("config: NOTIFIER must be log, webpush or email, got %q", c.NotifierKind)
 	}
 	return nil
+}
+
+func validateOIDCIssuer(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("config: OIDC_ISSUER must be an absolute HTTPS URL")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	// Plain HTTP is useful only for a loopback provider in local tests. Never
+	// allow an Internet or LAN identity provider to downgrade token transport.
+	if u.Scheme == "http" && (u.Hostname() == "localhost" || net.ParseIP(u.Hostname()).IsLoopback()) {
+		return nil
+	}
+	return fmt.Errorf("config: OIDC_ISSUER must use HTTPS (HTTP is allowed only for loopback)")
 }
 
 // DevAuthEnabled reports whether POST /api/v1/dev/login should be mounted.
@@ -227,6 +281,21 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envCSV(key string) []string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			values = append(values, part)
+		}
+	}
+	return values
 }
 
 func envInt(key string, def int) (int, error) {

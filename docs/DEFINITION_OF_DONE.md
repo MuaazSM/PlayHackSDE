@@ -22,10 +22,11 @@ PostgreSQL 16 in Docker, `WRITE_QUEUE_DEPTH=24`, `DB_REPLICA_URL` empty
 | Partially passing | 2 |
 | Not passing | 1 |
 
-The one hard failure and both partials have the **same single cause**: `/web`
-contains only a `.gitkeep`. There is no frontend. Every backend guarantee this
-project is actually judged on — the concurrency proof, the latency budgets, the
-invariants — is green.
+This report's original hard failure and both partials were recorded before the
+frontend implementation. The current client lives in `/web` and closes the
+human-facing portion of those items; the browser demo has not yet been timed or
+rehearsed twice. Every backend guarantee this project is actually judged on —
+the concurrency proof, the latency budgets, the invariants — is green.
 
 ---
 
@@ -40,16 +41,17 @@ invariants — is green.
   the replica pool with a 5 s Redis cache.
 - ✅ Derived at read time from the bookings table, verified against an
   independent oracle for every slot (see item 4).
-- ❌ **Not browsable by a human.** There is no UI. `/web` is empty. A judge
-  cannot browse anything; they can `curl` it.
+- ✅ **Browsable by a human.** The responsive `/web` client renders the campus
+  grid from the one-request payload and lets a student choose a slot. Browser
+  p95 for the campus grid is still unmeasured in this pass.
 - ⚠️ **p95 not measured in this pass.** The endpoint is exercised functionally by
   `test/availability` and `test/api`, but no p95 figure for the campus grid was
   recorded, so the < 400 ms target is **unverified**, not met-or-missed. The only
   latency numbers this repo can currently stand behind are the write-path ones in
   item 7.
 
-**To close:** build the discovery grid; add a p95 assertion for
-`GET /api/v1/availability` to the load harness.
+**To close:** add a p95 assertion for `GET /api/v1/availability` to the load
+harness and record a browser measurement.
 
 ---
 
@@ -172,7 +174,7 @@ against the running compose database — safe to run mid-demo).
 
 ---
 
-### 6. ❌ NOT PASSING — Demo tells a clear story from problem to proof
+### 6. ⚠️ PARTIAL — Demo tells a clear story from problem to proof
 
 *Target: six beats, under four minutes, rehearsed twice.*
 
@@ -181,16 +183,14 @@ against the running compose database — safe to run mid-demo).
 - ✅ Beats 1, 3, 5 and 6 are deliverable today. Beat 3 — the proof — is the
   strongest one and is fully in-process against a local database, so venue wifi
   cannot break it.
-- ❌ **Beats 2 and 4 have no UI.** Beat 2 is "discovery grid → pick slot →
-  confirm" and beat 4 is "waitlisted student promoted and notified in real time
-  on a second screen". Both are implemented and tested as API and SSE; neither
-  has a screen. The runbook drives them with `curl`, which is honest but is not
-  the usability criterion the brief is asking about.
+- ✅ **Beats 2 and 4 have a UI.** The `/web` client includes the discovery grid,
+  booking confirmation, waitlist state, claim flow and SSE-driven refresh. A
+  second-screen promotion rehearsal has not yet been recorded.
 - ❌ **Never rehearsed.** Not once, let alone twice. No timing run exists, so
   "under four minutes" is an estimate, not a measurement.
 
-**This is the largest single gap in the project**, and it is one gap, not three:
-build `/web` and items 1, 2 and 6 all move.
+**The remaining gap is rehearsal:** run the browser flow twice, record the
+timing, and add the campus-grid p95 measurement.
 
 ---
 
@@ -324,17 +324,17 @@ Run as part of this hardening pass. All clean, no fixes were required.
 
 Ordered by what a judge would notice first.
 
-1. **No frontend.** `/web` is a `.gitkeep`. Blocks DoD items 1, 2 and 6.
-2. **Demo never rehearsed.** No timing run; "under four minutes" is an estimate.
+1. **Browser demo never rehearsed.** The `/web` client is implemented, but no timing run exists; "under four minutes" is an estimate.
 3. **Read replica never brought up.** `make dev-replica` is untested;
    `DB_REPLICA_URL` empty and falling back to the primary is a supported
    configuration and is how everything here is run and tested — but the standby
    itself has not been exercised, and neither has replica lag.
-4. **Analytics has no UI.** `GET /api/v1/admin/analytics` (§10.2, FR-17) is
-   implemented and tested — utilisation, peak-demand heatmap, no-show rate,
-   unmet demand and slot recovery, all derived by query off the replica with a
-   60 s Redis cache, no rollup table and nothing counted on the write path. The
-   manager console that would render it is part of item 1.
+4. **Analytics browser rehearsal remains.** `GET /api/v1/admin/analytics`
+   (§10.2, FR-17) is implemented and tested — utilisation, peak-demand
+   heatmap, no-show rate, unmet demand and slot recovery, all derived by query
+   off the replica with a 60 s Redis cache, no rollup table and nothing counted
+   on the write path. The manager console in `/web` renders these panels; its
+   browser flow has not been timed in this report.
 5. **`testutil.Slot18()` pins to *today* 18:00 IST.** Any suite using it fails
    when run after 18:00 local time, for reasons unrelated to correctness.
 6. **Full suite is flaky at default parallelism.** `go test ./... -race` runs

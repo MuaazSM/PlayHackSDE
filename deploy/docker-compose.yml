@@ -38,6 +38,7 @@ services:
       - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres/init-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U playhack -d playhack"]
       interval: 2s
@@ -157,7 +158,9 @@ services:
           done
           chmod 0700 "$$PGDATA"
         fi
-        exec postgres
+        # A standby may not lower parameters that size shared recovery state
+        # below the primary's values. The primary explicitly uses 200.
+        exec postgres -c max_connections=200
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U playhack -d playhack"]
       interval: 2s

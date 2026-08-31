@@ -59,6 +59,11 @@ type Notifier interface {
 // retries and a loud log line, not as notifications that quietly never arrive.
 var ErrTransportNotConfigured = errors.New("outbox: transport not configured")
 
+// ErrTransportUnavailable means a selected transport cannot deliver in this
+// build. It is returned instead of acknowledging an outbox row: nil is
+// reserved for a notification that actually reached its transport.
+var ErrTransportUnavailable = errors.New("outbox: transport unavailable")
+
 // ---------------------------------------------------------------------------
 // LogNotifier — the demo default.
 
@@ -93,7 +98,7 @@ func (n *LogNotifier) Notify(ctx context.Context, msg Message) error {
 }
 
 // ---------------------------------------------------------------------------
-// WebPushNotifier — VAPID. Stubbed.
+// WebPushNotifier — VAPID.
 
 // WebPushConfig holds the VAPID application-server identity. The keypair is
 // generated once and pinned; rotating it invalidates every existing browser
@@ -114,15 +119,9 @@ func (c WebPushConfig) Configured() bool {
 
 // WebPushNotifier delivers over the Web Push protocol.
 //
-// STUB. The signing and the POST to each subscription endpoint are not
-// implemented — that is a browser-integration task, not a concurrency one, and
-// this project is judged on the write path. What is real is the shape: the
-// dispatcher hands it a committed Message and takes back an error meaning
-// "retry", so swapping the body of Notify for a real webpush client changes
-// nothing above it.
-//
-// Subscriptions would be looked up per recipient from a push_subscriptions
-// table; there is no such table yet and this phase does not add one.
+// Delivery is unavailable until endpoint subscriptions, payload encryption
+// and VAPID signing are wired together. It must not acknowledge a message by
+// logging a fake success.
 type WebPushNotifier struct {
 	cfg WebPushConfig
 	log *slog.Logger
@@ -136,23 +135,22 @@ func NewWebPushNotifier(cfg WebPushConfig, log *slog.Logger) *WebPushNotifier {
 	return &WebPushNotifier{cfg: cfg, log: log}
 }
 
-// Notify would sign a VAPID JWT and POST the payload to each of the recipient's
-// subscription endpoints.
+// Notify reports the unavailable transport so the dispatcher retries it.
 func (n *WebPushNotifier) Notify(ctx context.Context, msg Message) error {
 	if !n.cfg.Configured() {
 		return fmt.Errorf("%w: web push (VAPID keypair and subject required)", ErrTransportNotConfigured)
 	}
 
-	n.log.InfoContext(ctx, "web push (stub)",
+	n.log.ErrorContext(ctx, "web push delivery unavailable; notification will be retried",
 		"outbox_id", msg.ID,
 		"topic", msg.Topic,
 		"attempt", msg.Attempts,
 		"subject", n.cfg.Subject)
-	return nil
+	return fmt.Errorf("%w: web push delivery is not implemented", ErrTransportUnavailable)
 }
 
 // ---------------------------------------------------------------------------
-// EmailNotifier — fallback. Stubbed.
+// EmailNotifier — fallback.
 
 // EmailNotifier is the fallback for students with no push subscription.
 //
@@ -173,16 +171,16 @@ func NewEmailNotifier(from string, log *slog.Logger) *EmailNotifier {
 	return &EmailNotifier{from: from, log: log}
 }
 
-// Notify would render the topic's template and hand it to the campus relay.
+// Notify reports the unavailable transport so the dispatcher retries it.
 func (n *EmailNotifier) Notify(ctx context.Context, msg Message) error {
 	if n.from == "" {
 		return fmt.Errorf("%w: email (sender address required)", ErrTransportNotConfigured)
 	}
 
-	n.log.InfoContext(ctx, "email (stub)",
+	n.log.ErrorContext(ctx, "email delivery unavailable; notification will be retried",
 		"outbox_id", msg.ID,
 		"topic", msg.Topic,
 		"attempt", msg.Attempts,
 		"from", n.from)
-	return nil
+	return fmt.Errorf("%w: email delivery is not implemented", ErrTransportUnavailable)
 }

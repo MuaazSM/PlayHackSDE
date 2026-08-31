@@ -96,7 +96,7 @@ func NewRouter(d RouterDeps) http.Handler {
 	}
 
 	auth := NewAuthenticator(d.Config, d.DB.Primary)
-	limiter := NewRateLimiter(d.Redis, time.Minute, log)
+	limiter := NewRateLimiter(d.Redis, time.Minute, log, d.Config.TrustedProxyCIDRs)
 	shedder := NewShedder(d.Config.WriteQueueDepth, d.Config.WriteTimeout)
 	loc, err := time.LoadLocation(d.Config.TZDisplay)
 	if err != nil {
@@ -144,7 +144,6 @@ func NewRouter(d RouterDeps) http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(Metrics)
 	r.Use(cors)

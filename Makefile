@@ -31,11 +31,9 @@ DB_REPLICA_URL ?=
 
 # WRITE_QUEUE_DEPTH, measured on THIS hardware rather than assumed.
 #
-# internal/config.DefaultWriteQueueDepth is 128, tuned on a container Postgres
-# with the durability turned down. Through PgBouncer against the compose stack a
-# booking transaction costs several times more, and the bound has to come down
-# with it — the depth is a per-environment number by construction (see the sweep
-# table on that constant), not a property of the code.
+# The code default and this operational default are both 24. Keeping them equal
+# prevents direct `go run` startup from silently selecting the known-slow
+# 128-depth profile. The depth remains per-environment and overridable.
 #
 # `make load`, n=500, one contended slot, on this laptop:
 #
@@ -61,7 +59,7 @@ MIGRATE := $(shell command -v migrate 2>/dev/null || echo "go run -tags 'postgre
 
 N ?= 500
 
-.PHONY: dev dev-replica down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset load chaos audit audit-live lint tidy psql
+.PHONY: dev dev-replica verify-replica down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset load chaos audit audit-live lint tidy psql
 
 ## dev: bring up postgres, pgbouncer, redis and wait for health
 dev:
@@ -84,6 +82,10 @@ dev:
 dev-replica: dev
 	$(COMPOSE) --profile replica up -d postgres-replica
 	@$(COMPOSE) --profile replica ps
+
+## verify-replica: prove the compose standby is read-only and replaying WAL
+verify-replica:
+	bash scripts/verify-replica.sh
 
 ## down: stop the stack (keeps the volume)
 down:

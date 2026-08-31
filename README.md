@@ -51,7 +51,7 @@ Pass the same overrides to every subsequent target (`make migrate-up`, `make see
 | `make psql` | psql into the compose Postgres |
 | `make lint` / `make tidy` | golangci-lint / go mod tidy |
 
-`WRITE_QUEUE_DEPTH` is pinned to 24 in the Makefile, not the code's default of 128. It is a per-environment number by construction: through PgBouncer against the compose stack a booking transaction costs several times more than on the tuned container the constant was measured on, and at 128 this hardware misses the 150 ms rejection budget outright (368 ms). The sweep table that produced 24 is in the Makefile.
+`WRITE_QUEUE_DEPTH` defaults to 24 in both the application and Makefile. It is a per-environment number by construction: through PgBouncer against the compose stack a booking transaction costs several times more than on the tuned container, and at 128 this hardware misses the 150 ms rejection budget outright (368 ms). The sweep table that produced 24 is in the Makefile.
 
 ---
 
@@ -59,12 +59,12 @@ Pass the same overrides to every subsequent target (`make migrate-up`, `make see
 
 ```
    ┌──────────────┐    ┌──────────────┐
-   │ Browser /PWA │    │  Race console│         (frontend not yet built —
-   └──────┬───────┘    └──────┬───────┘          see Known limitations)
+   │ Browser /PWA │    │  Race console│         (implemented in /web)
+   └──────┬───────┘    └──────┬───────┘
           │                   │
           ▼                   ▼
    ┌──────────────────────────────────┐
-   │  Next.js 14 (App Router, TS)     │  planned; /web is currently empty
+   │  Next.js 14 (App Router, TS)     │  /web
    └──────────────┬───────────────────┘
                   │ HTTP + SSE
                   ▼
@@ -211,7 +211,7 @@ Stated plainly, because a limitation you name is worth more than one a judge fin
 
 **The full test suite is flaky at default parallelism.** `go test ./... -race` runs sixteen packages in parallel, each spinning its own Postgres container and some of them firing 500-goroutine races, which saturates a laptop Docker VM. Under that load the latency-budgeted tests in `test/booking` and `test/concurrency` intermittently fail — a few attempts hit `context deadline exceeded`, or the 40 ms alternatives budget expires and a 409 arrives bare. Every one of them passes in isolation and per-package, and no failure has ever implicated the invariant (`db_count = 1` held in all of them). **Run the full suite with `-p 4`.** This is ambient machine load, not a logic regression, and no test was weakened to hide it.
 
-**There is no frontend yet.** `/web` contains only a `.gitkeep`. The Next.js app, the discovery grid, the confirm and result screens, the manager console and the browser race console at `/race` are designed (IMPLEMENTATION.md §12–13) and their API contract is implemented and tested, but no UI code has been written. Beats 2 and 4 of the demo currently have to be driven through the API. `POST /api/v1/demo/race` and `make race-demo` are the race console's backend and they work; the 500 dots do not exist.
+**Frontend status.** The Next.js client now lives in `/web` and covers the student discovery, booking, waitlist, claim, check-in, manager console, analytics, venue token and `/race` proof flows. Run `cd web && npm install && npm run dev`, then open `http://localhost:3000` while the API is running on `:8080`. `POST /api/v1/demo/race` remains the in-process proof backend used by the browser race console. Browser demo timing and full end-to-end rehearsal remain to be recorded.
 
 ---
 

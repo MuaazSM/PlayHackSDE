@@ -19,7 +19,7 @@ func TestHTTP_FacilityAvailability(t *testing.T) {
 	require.Equal(t, http.StatusCreated,
 		a.createBooking(t, token, testutil.CourtID(), start, 60, uuid.NewString()).status)
 
-	date := time.Now().In(testutil.IST).Format("2006-01-02")
+	date := start.In(testutil.IST).Format("2006-01-02")
 	resp := a.do(t, request{
 		method: http.MethodGet,
 		path:   "/api/v1/facilities/" + testutil.CourtID().String() + "/availability?date=" + date,
@@ -120,14 +120,17 @@ func TestHTTP_AvailabilityIsNotShed(t *testing.T) {
 
 	out := testutil.Race(t, writes+reads, func(ctx context.Context, i int) (any, error) {
 		if i < writes {
-			return a.createBooking(t, token, testutil.CourtID(), start, 60, uuid.NewString()), nil
+			return a.createBookingResult(ctx, token, testutil.CourtID(), start, 60, uuid.NewString())
 		}
-		return a.do(t, request{method: http.MethodGet, path: "/api/v1/availability", token: token}), nil
+		return a.doResult(ctx, request{method: http.MethodGet, path: "/api/v1/availability", token: token})
 	})
 
 	var shedWrites, okReads int
 	for _, at := range out.Attempts {
-		resp := at.Value.(response)
+		resp, ok := responseFromAttempt(t, at)
+		if !ok {
+			continue
+		}
 		if at.Index < writes {
 			if resp.status == http.StatusTooManyRequests {
 				shedWrites++

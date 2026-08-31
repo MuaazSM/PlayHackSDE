@@ -19,9 +19,8 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -113,15 +112,6 @@ func (p *pg) terminate(ctx context.Context) error {
 	return p.container.Terminate(ctx)
 }
 
-// migrationsDir resolves /migrations relative to this source file, so the tests
-// do not depend on the working directory.
-func migrationsDir(t testing.TB) string {
-	t.Helper()
-	dir, err := resolveMigrationsDir()
-	require.NoError(t, err)
-	return dir
-}
-
 func resolveMigrationsDir() (string, error) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -141,12 +131,20 @@ func resolveMigrationsDir() (string, error) {
 // It connects DIRECTLY to postgres, never through PgBouncer: golang-migrate
 // takes a session-level advisory lock, which a transaction-mode pooler cannot
 // honour.
+//
+// The iofs source reads migrations through an fs.FS rather than a file URL:
+// golang-migrate's file driver keeps the leading slash of a file:///C:/... URL,
+// a path Windows cannot resolve, which broke this suite on a fresh clone.
 func newMigrator(dsn string) (*migrate.Migrate, error) {
 	dir, err := resolveMigrationsDir()
 	if err != nil {
 		return nil, err
 	}
-	return migrate.New("file://"+dir, pgx5DSN(dsn))
+	src, err := iofs.New(os.DirFS(dir), ".")
+	if err != nil {
+		return nil, err
+	}
+	return migrate.NewWithSourceInstance("iofs", src, pgx5DSN(dsn))
 }
 
 // pgx5DSN rewrites a postgres:// URL onto golang-migrate's pgx/v5 driver.

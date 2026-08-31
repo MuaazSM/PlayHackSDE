@@ -12,30 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned to the version go.mod targets, with GOTOOLCHAIN=local so the
-      # toolchain REFUSES to silently upgrade. This is what enforces the Go 1.22
-      # line: without it, a dependency or a stdlib call needing a newer Go (say
-      # t.Context(), added in 1.24) is downloaded around rather than reported,
-      # and the version claim quietly stops being true.
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          check-latest: false
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
 
       - name: Refuse toolchain upgrades
         run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
 
       - name: Go version in use
         run: go version
-
-      - name: Verify go.mod still targets 1.22
-        run: |
-          want=1.22
-          got=$(awk '/^go /{print $2}' go.mod | cut -d. -f1,2)
-          if [ "$got" != "$want" ]; then
-            echo "go.mod targets $got, expected $want" >&2
-            exit 1
-          fi
 
       - name: gofmt
         run: |
@@ -48,6 +35,16 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
       - name: Build
         run: go build ./...
 
@@ -55,31 +52,131 @@ jobs:
       # CI faster; it is the only thing standing between a green build and an
       # overbooked court. Runners provide Docker, which testcontainers needs.
       - name: Tests
-        run: go test ./... -race -timeout 20m
+        run: go test ./... -race -p 4 -timeout 20m
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: Compile every package and test for Windows
+        run: go test ./... -run '^$'
+      - name: Windows unit tests
+        run: go test ./internal/... ./test/httpx/... -count=1
+
+  # The frontend is part of the shipped product, so it gets the same gate
+  # discipline as the backend: type errors, lint, unit tests and a production
+  # build all fail the PR. Browser E2E against the full stack is the remaining
+  # gap (F-05 follow-up) — these gates keep the app from regressing meanwhile.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Production build
+        run: npm run build
+
+  replica:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: Start primary and streaming replica
+        run: docker compose -f deploy/docker-compose.yml --profile replica up -d --wait postgres postgres-replica
+      - name: Migrate and seed primary
+        run: |
+          go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate -path migrations -database 'postgres://playhack:playhack@localhost:5432/playhack?sslmode=disable' up
+          DB_URL='postgres://playhack:playhack@localhost:5432/playhack?sslmode=disable' go run ./cmd/seed
+      - name: Verify WAL replay and read-only recovery
+        run: bash scripts/verify-replica.sh
+      - name: Pause replay and prove stale reads cannot corrupt writes
+        env:
+          CHAOS_PRIMARY_URL: postgres://playhack:playhack@localhost:5432/playhack?sslmode=disable
+          CHAOS_REPLICA_URL: postgres://playhack:playhack@localhost:5433/playhack?sslmode=disable
+        run: go test ./test/chaos -run '^TestReplicaLagDoesNotCorrupt$' -v -timeout 10m
+      - name: Compose logs
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml --profile replica logs
+      - name: Stop replica stack
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml --profile replica down -v
+
+  pgbouncer-restart:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: Start the real pooler stack
+        run: docker compose -f deploy/docker-compose.yml up -d --wait postgres pgbouncer redis
+      - name: Migrate and seed
+        run: |
+          go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate -path migrations -database 'postgres://playhack:playhack@localhost:5432/playhack?sslmode=disable' up
+          DB_URL='postgres://playhack:playhack@localhost:6432/playhack?sslmode=disable' go run ./cmd/seed
+      - name: Restart PgBouncer during a booking storm
+        env:
+          CHAOS_PGBOUNCER_URL: postgres://playhack:playhack@localhost:6432/playhack?sslmode=disable
+          CHAOS_PGBOUNCER_CONTAINER: playhack-pgbouncer
+        run: go test ./test/chaos -run '^TestComposePgBouncerRestart$' -v -timeout 10m
+      - name: Compose logs
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs
+      - name: Stop pooler stack
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
 
   # The 6 PM surge profile: 500 VUs at one slot, with the p99 budgets as failing
   # thresholds (IMPLEMENTATION.md §14).
   #
-  # NON-BLOCKING, on purpose. The numbers depend on the machine underneath, and a
-  # shared GitHub runner is not the machine the demo runs on — gating merges on
-  # its timing would train everybody to re-run CI until it went green, which is
-  # worse than not gating at all. The job still runs, and its output is still the
-  # place to read what the write path cost on a known box.
-  #
-  # The budgets ARE enforced, on hardware that means something, by
-  # TestLoadProfile_ThresholdsPass in the blocking job above and by `make load`
-  # before a demo.
+  # This is blocking. A latency claim cannot coexist with a red or advisory-only
+  # gate. The local `make load` run remains the release measurement on demo
+  # hardware; CI additionally prevents transport errors and gross regressions.
   load:
     runs-on: ubuntu-latest
-    continue-on-error: true
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          check-latest: false
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
 
       - name: Refuse toolchain upgrades
         run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"

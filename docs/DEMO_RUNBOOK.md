@@ -4,7 +4,7 @@ Six beats, 3 min 20 s. Source: IMPLEMENTATION.md §17.
 
 The thing being demonstrated is that a database constraint decides the winner of a race. Every beat either sets that up or proves it. If time is lost, lose it from beats 1, 2 and 5 — **never** from beat 3.
 
-Read the Known limitations section of the README before rehearsing. Two of them shape this runbook: there is no frontend yet, so beats 2 and 4 are driven through the API rather than a UI; and `testutil.Slot18()` pins the contended slot to *today at 18:00 IST*, so a demo given after 18:00 local time needs `-at` moved forward (see the beat 3 fallback).
+Read the Known limitations section of the README before rehearsing. The web client now covers beats 2 and 4; `testutil.Slot18()` still pins the contended slot to *today at 18:00 IST*, so a demo given after 18:00 local time needs `-at` moved forward (see the beat 3 fallback).
 
 ---
 
@@ -34,7 +34,7 @@ Run this **30 minutes before** the slot, not five. Every step below has failed f
 - [ ] `AUTH_MODE=dev` (the default). Without it, `POST /api/v1/dev/login`, `POST /api/v1/demo/race` and `POST /api/v1/demo/reset` **are not registered at all** — they do not 403, they 404, because an endpoint that mints tokens for any roll number should not be one config flag away from serving.
 - [ ] `NOTIFIER=log` (the default). `webpush` without VAPID keys is a boot error by design.
 - [ ] `CHECKIN_HMAC_SECRET` set if you intend to show check-in. Empty means every check-in is refused and the API warns about it at boot — scroll back and look for that line.
-- [ ] `WRITE_QUEUE_DEPTH` left at the Makefile's 24, not the code default of 128. At 128 this class of hardware misses the 150 ms rejection budget (measured 368 ms).
+- [ ] `WRITE_QUEUE_DEPTH` left at the application and Makefile default of 24. At 128 this class of hardware misses the 150 ms rejection budget (measured 368 ms).
 
 ### Rehearsal
 
@@ -65,7 +65,7 @@ Run this **30 minutes before** the slot, not five. Every step below has failed f
 
 **Say:** "Before the proof, the product. A student opens the campus grid — every facility, every hour, one request. Picks 6 PM on Tennis Court 1. Confirms. One tap, an explicit confirmation with a reference number, and the availability everyone else is looking at updates over SSE without a refresh." Deliberately unhurried — this is the usability criterion and rushing it reads as having nothing to show.
 
-**Do:** *(No UI exists yet — `/web` is empty. Drive it through the API, and say so rather than letting it look like an omission.)* Three prepared curls in a large-font terminal, or a REST client with the requests saved:
+**Do:** Open the web client at `http://localhost:3000`, sign in as `student01`, select the campus date and tap a free cell in the discovery grid. The confirmation view shows the booking reference and check-in reminder. Keep the three prepared curls below as a deterministic fallback if the browser or API is unavailable:
 
 The API takes a **UUID** for `facility_id` and an **RFC3339 timestamp** for `start` — only the `racedemo` CLI accepts a slug and `HH:MM`. Resolve the id once and keep it in a variable:
 

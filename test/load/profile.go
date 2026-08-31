@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"sync"
@@ -71,10 +72,7 @@ type Report struct {
 	ConflictP99 time.Duration  `json:"conflict_p99_ns"`
 	ShedP99     time.Duration  `json:"shed_p99_ns"`
 	Failures    []string       `json:"failures"`
-	percentiles map[string]dur `json:"-"`
 }
-
-type dur = time.Duration
 
 // Confirmed counts 201s. A 200 is an idempotent replay, which cannot happen here
 // — every request carries its own key — so it is counted separately and its
@@ -113,12 +111,65 @@ type Runner struct {
 	Tokens []string
 }
 
+// newHTTPClient keeps the load driver from turning transient loopback listener
+// pressure into lost requests. It does not cap request concurrency: every
+// caller still enters Runner.Run together, and only a failed TCP dial is
+// retried before its error is reported.
+func newHTTPClient(n int, timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = n + 16
+	transport.MaxIdleConnsPerHost = n + 16
+	transport.MaxConnsPerHost = n + 16
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = dialWithRetry(dialer)
+	return &http.Client{Timeout: timeout, Transport: transport}
+}
+
+func dialWithRetry(dialer *net.Dialer) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		var lastErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+			if attempt == 3 {
+				break
+			}
+			timer := time.NewTimer(time.Duration(1<<uint(attempt)) * 5 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return nil, ctx.Err()
+			}
+		}
+		return nil, lastErr
+	}
+}
+
 // Run releases every goroutine at once and collects the split.
 //
 // The barrier matters. Goroutines started in a loop arrive spread over however
 // long the loop took, which at n=500 is long enough that the first request can
 // commit before the last one is built — and a race nobody was in is not a race.
-func (r *Runner) Run(ctx context.Context, n int) *Report {
+//
+// The connections are warmed BEFORE the barrier, in waves of 25. Releasing n
+// goroutines against a cold pool means n simultaneous loopback dials, and on
+// Windows a listener answers part of that SYN burst with a refusal. A refused
+// dial is a transport error about the test machine, not a measurement of the
+// write path — and it used to fail the majority of runs here.
+func (r *Runner) Run(ctx context.Context, n int) (*Report, error) {
+	if err := r.warmConnections(ctx, n); err != nil {
+		return nil, err
+	}
+
 	var (
 		wg       sync.WaitGroup
 		barrier  = make(chan struct{})
@@ -150,7 +201,46 @@ func (r *Runner) Run(ctx context.Context, n int) *Report {
 	wg.Wait()
 	wall := time.Since(started)
 
-	return summarise(attempts, wall)
+	return summarise(attempts, wall), nil
+}
+
+// warmConnections establishes n idle keep-alive connections through the run's
+// own client, so the race measures the write path rather than TCP setup.
+func (r *Runner) warmConnections(ctx context.Context, n int) error {
+	const wave = 25
+	for established := 0; established < n; established += wave {
+		size := min(wave, n-established)
+
+		var (
+			wg   sync.WaitGroup
+			errs = make([]error, size)
+		)
+		for i := 0; i < size; i++ {
+			wg.Add(1)
+			go func(slot int) {
+				defer wg.Done()
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.BaseURL+"/healthz", nil)
+				if err != nil {
+					errs[slot] = err
+					return
+				}
+				resp, err := r.Client.Do(req)
+				if err != nil {
+					errs[slot] = err
+					return
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}(i)
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				return fmt.Errorf("load: warming %d connections: %w", n, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Runner) fire(ctx context.Context, body []byte, token string) Attempt {
@@ -228,6 +318,18 @@ func p99(xs []time.Duration) time.Duration {
 // constraint, in which case exactly one request may be confirmed. For a shared
 // facility the winner count is the capacity and this check does not apply.
 func (r *Report) Check(exclusive bool) []string {
+	return r.check(exclusive, true)
+}
+
+// CheckWithoutLatency validates the correctness and transport invariants while
+// omitting latency budgets. The load test uses this under -race because race
+// instrumentation changes wall-clock measurements; the printed report must
+// still reflect the checks that actually ran.
+func (r *Report) CheckWithoutLatency(exclusive bool) []string {
+	return r.check(exclusive, false)
+}
+
+func (r *Report) check(exclusive, checkLatency bool) []string {
 	var failures []string
 
 	if n := r.ServerErrors(); n > 0 {
@@ -239,6 +341,11 @@ func (r *Report) Check(exclusive bool) []string {
 	if exclusive && r.Confirmed() != 1 {
 		failures = append(failures,
 			fmt.Sprintf("%d confirmations for one exclusive slot (want exactly 1)", r.Confirmed()))
+	}
+
+	if !checkLatency {
+		r.Failures = failures
+		return failures
 	}
 
 	// An unmeasured percentile is a failure, not a pass. A run in which nobody

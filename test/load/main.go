@@ -127,16 +127,7 @@ func run(args []string, out io.Writer) error {
 		opts.n, base, start.In(loc).Format("2006-01-02 15:04 MST"), opts.minutes)
 
 	runner := &Runner{
-		Client: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				// Every virtual user needs its own connection or they queue in the
-				// client and the run measures Go's connection pool.
-				MaxIdleConns:        opts.n + 16,
-				MaxIdleConnsPerHost: opts.n + 16,
-				MaxConnsPerHost:     opts.n + 16,
-			},
-		},
+		Client:     newHTTPClient(opts.n, 30*time.Second),
 		BaseURL:    base,
 		FacilityID: facilityID,
 		Start:      start,
@@ -144,7 +135,10 @@ func run(args []string, out io.Writer) error {
 		Tokens:     tokens,
 	}
 
-	rep := runner.Run(ctxOrBackground(ctx), opts.n)
+	rep, err := runner.Run(ctxOrBackground(ctx), opts.n)
+	if err != nil {
+		return err
+	}
 	failures := rep.Check(exclusive)
 
 	if opts.asJSON {
@@ -197,14 +191,58 @@ func serveInProcess(ctx context.Context, cfg *config.Config, db *store.DB, loc *
 	}
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
+	base := "http://" + ln.Addr().String()
+	if err := waitForServer(ctx, base); err != nil {
+		_ = srv.Close()
+		return nil, "", err
+	}
 
 	stop := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}
-	_ = ctx
-	return stop, "http://" + ln.Addr().String(), nil
+	return stop, base, nil
+}
+
+// waitForServer does not merely wait for the listener to exist: it waits until
+// the HTTP accept loop has handled a probe. Starting the load immediately after
+// net.Listen can otherwise put hundreds of Windows loopback dials in the
+// listener backlog while Serve is still being scheduled, yielding transient
+// connection refusals that are not application results.
+func waitForServer(ctx context.Context, base string) error {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	probe := func() bool {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
+		if err != nil {
+			return false
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return false
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+
+	for {
+		if probe() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("load: in-process server did not become ready: %w", ctx.Err())
+		case <-deadline.C:
+			return fmt.Errorf("load: in-process server did not become ready within 10s")
+		case <-ticker.C:
+		}
+	}
 }
 
 // mintTokens creates n throwaway students and signs a bearer for each.
