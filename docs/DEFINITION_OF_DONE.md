@@ -330,9 +330,11 @@ Ordered by what a judge would notice first.
    `DB_REPLICA_URL` empty and falling back to the primary is a supported
    configuration and is how everything here is run and tested — but the standby
    itself has not been exercised, and neither has replica lag.
-4. **Analytics endpoints not implemented.** Phase 14 was skipped as P2.
-   `GET /api/v1/admin/analytics` (§10.2) does not exist. The README does not
-   claim it.
+4. **Analytics has no UI.** `GET /api/v1/admin/analytics` (§10.2, FR-17) is
+   implemented and tested — utilisation, peak-demand heatmap, no-show rate,
+   unmet demand and slot recovery, all derived by query off the replica with a
+   60 s Redis cache, no rollup table and nothing counted on the write path. The
+   manager console that would render it is part of item 1.
 5. **`testutil.Slot18()` pins to *today* 18:00 IST.** Any suite using it fails
    when run after 18:00 local time, for reasons unrelated to correctness.
 6. **Full suite is flaky at default parallelism.** `go test ./... -race` runs

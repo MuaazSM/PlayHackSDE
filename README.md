@@ -141,6 +141,7 @@ Ground truth is `internal/httpx/router.go`. Everything below exists in the code;
 | POST | `/api/v1/closures` | **manager** | Inserts a `BLOCKED` row. `Idempotency-Key` required |
 | GET | `/api/v1/closures` | **manager** | Console board; names affected bookings |
 | DELETE | `/api/v1/closures/{id}` | **manager** | Reopen; restores declared capacity |
+| GET | `/api/v1/admin/analytics` | **manager or secretary** | Utilisation, peak-demand heatmap, no-show rate, unmet demand, slot recovery. `?from=&to=` local dates, inclusive. Derived by query; replica + 60 s Redis cache |
 | POST | `/api/v1/demo/race` | any | **Dev mode only.** N in-process attempts + a fresh DB read-back |
 | POST | `/api/v1/demo/reset` | any | **Dev mode only.** Clears the demo slot so the race re-runs on stage |
 
@@ -205,8 +206,6 @@ It runs against a real Postgres via testcontainers. A mock cannot exercise an ex
 Stated plainly, because a limitation you name is worth more than one a judge finds.
 
 **The read replica has never been brought up in this environment.** `make dev-replica` is written but untested — it was cut for budget. `DB_REPLICA_URL` defaults to empty, which makes availability reads fall back to the primary. That fallback is a *supported* configuration, not a degraded one, and it is how everything in this repo is run and tested. The read/write split is real code on a real config flag; the standby behind it has not been exercised.
-
-**Analytics endpoints are not implemented.** IMPLEMENTATION.md §10.2 lists `GET /api/v1/admin/analytics` (utilisation, peak, no-show, unmet demand). Phase 14 was skipped as a P2 to protect the metrics and hardening work ahead of it. There is no analytics route in `router.go` and the endpoint table above does not list one.
 
 **`testutil.Slot18()` pins to *today* at 18:00 IST.** It is the contended slot every race test fights over, and it is computed from `time.Now()` rather than from a fixed future date — so any suite that uses it starts failing if the tests are run after 18:00 local time, because the booking is then in the past. Run the suites before 18:00 IST, or expect a batch of failures that have nothing to do with correctness.
 

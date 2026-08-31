@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/iitg-playhack/sportsbook/internal/analytics"
 	"github.com/iitg-playhack/sportsbook/internal/booking"
 	"github.com/iitg-playhack/sportsbook/internal/checkin"
 	"github.com/iitg-playhack/sportsbook/internal/config"
@@ -48,6 +49,12 @@ type RouterDeps struct {
 	// point — a race console wired to its own service would be demonstrating
 	// that service rather than this one.
 	Demo *demo.Service
+
+	// Analytics backs GET /api/v1/admin/analytics (§10.2, FR-17). Optional, and
+	// left nil the router builds one over d.DB.Replica — the same replica the
+	// availability path reads, deliberately: these are the only aggregate scans
+	// in the system and they must not land on the primary the write path needs.
+	Analytics *analytics.Service
 
 	// Live backs GET /api/v1/stream (§9). Optional, but a hub is only useful if
 	// somebody is running it: left nil the router builds one over d.Redis that
@@ -128,6 +135,12 @@ func NewRouter(d RouterDeps) http.Handler {
 		hub = live.NewHub(d.Redis, log)
 	}
 	sse := NewSSE(hub, loc).WithHeartbeat(d.StreamHeartbeat)
+
+	an := d.Analytics
+	if an == nil {
+		an = analytics.NewService(d.DB.Replica, d.Redis, d.Config.TZDisplay, log)
+	}
+	analyticsHandlers := NewAnalyticsHandlers(an, loc)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -221,6 +234,16 @@ func NewRouter(d RouterDeps) http.Handler {
 				r.Get("/", h.ListClosures)
 				r.Delete("/{id}", h.ReopenClosure)
 			})
+
+			// Manager analytics (§10.2, FR-17). MANAGER or SECRETARY: the
+			// secretary is a student office-holder who reads the same reports
+			// but has no business closing a facility, which is why this is
+			// RequireAnyRole and /closures is still RequireRole(MANAGER).
+			//
+			// Not shed. It is a read served off the replica behind a 60s cache,
+			// and the queue bound exists to protect the write path from itself.
+			r.With(RequireAnyRole(RoleManager, RoleSecretary)).
+				Get("/admin/analytics", analyticsHandlers.Report)
 
 			// The race console (§13). Registered ONLY in dev mode, the same
 			// rule POST /api/v1/dev/login follows and for the same reason:

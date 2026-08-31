@@ -84,6 +84,16 @@ const (
 	OutboxListen          = "outbox_listen"
 	OutboxPending         = "outbox_pending"
 
+	// Manager analytics (§10.2, FR-17). All five are DERIVED from bookings,
+	// waitlist and check_ins at read time. There is no rollup table and nothing
+	// is counted on the write path — a summary that is recomputed cannot drift
+	// from the rows it summarises.
+	AnalyticsUtilisation = "analytics_utilisation"
+	AnalyticsHeatmap     = "analytics_heatmap"
+	AnalyticsNoShow      = "analytics_no_show"
+	AnalyticsUnmetDemand = "analytics_unmet_demand"
+	AnalyticsRecovery    = "analytics_slot_recovery"
+
 	// Observability (§14). Gauge inputs, sampled on a ticker — never on a
 	// request path.
 	ReplicaLag = "replica_lag"
@@ -148,6 +158,11 @@ var required = []string{
 	OutboxRequeueFailed,
 	OutboxListen,
 	OutboxPending,
+	AnalyticsUtilisation,
+	AnalyticsHeatmap,
+	AnalyticsNoShow,
+	AnalyticsUnmetDemand,
+	AnalyticsRecovery,
 	ReplicaLag,
 	DemoCountConfirmed,
 	DemoResetSlot,
