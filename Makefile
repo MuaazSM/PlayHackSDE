@@ -61,7 +61,7 @@ MIGRATE := $(shell command -v migrate 2>/dev/null || echo "go run -tags 'postgre
 
 N ?= 500
 
-.PHONY: dev dev-replica down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset load lint tidy psql
+.PHONY: dev dev-replica down logs migrate-up migrate-down migrate-drop seed run worker test test-race race-demo race-reset load chaos audit audit-live lint tidy psql
 
 ## dev: bring up postgres, pgbouncer, redis and wait for health
 dev:
@@ -150,6 +150,34 @@ race-reset:
 ##   make load LOAD_ARGS="-url http://localhost:8080"   # against a running API
 load:
 	DB_URL="$(DB_URL)" DB_REPLICA_URL="$(DB_REPLICA_URL)" WRITE_QUEUE_DEPTH="$(WRITE_QUEUE_DEPTH)" go run ./test/load -n $(N) $(LOAD_ARGS)
+
+## chaos: break Redis, the read path, the API and the connection pool while the
+## write path is running, and check the invariant survived each one.
+##
+## Excluded from `make test` (which runs -short) on purpose: each of these
+## starts its own Postgres and Redis and fires a 200-request storm, and running
+## them alongside every other package saturates a laptop Docker VM badly enough
+## to knock over the latency-budgeted tests elsewhere.
+chaos:
+	go test ./test/chaos/... -v -count=1 -timeout 600s
+
+## audit: the continuous-invariant suite. Safe to run at any time, including
+## mid-demo, because it only reads.
+##
+## Self-contained by default: starts a throwaway Postgres, generates real
+## contended state (a 200-way race, a capacity burst, a closure, a hold) and then
+## audits it. A clean database satisfies every invariant trivially, so auditing
+## one would prove nothing.
+audit:
+	go test ./test/invariants/... -v -count=1 -timeout 300s
+
+## audit-live: point the same suite at the running compose database.
+##
+## This is the stage version — fire `make race-demo N=500`, then run this and
+## show a judge that the invariants held on the database they just hammered,
+## rather than on a scenario rebuilt for the occasion. Writes nothing.
+audit-live:
+	AUDIT_DB_URL="$(DB_URL)" go test ./test/invariants/... -v -count=1 -timeout 300s
 
 lint:
 	golangci-lint run

@@ -2,6 +2,10 @@
 *.pdf
 *.md
 !README.md
+# Explicit negations, per CLAUDE.md: a doc that needs to ship gets a `!` line
+# rather than a loosened rule. These two are read by a judge, not by us.
+!docs/DEMO_RUNBOOK.md
+!docs/DEFINITION_OF_DONE.md
 
 # Go
 /bin/
