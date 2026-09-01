@@ -8,6 +8,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,7 +18,7 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/seed"
 	"github.com/iitg-playhack/sportsbook/internal/store"
@@ -203,10 +204,19 @@ func migrateUp(dsn string) error {
 		return err
 	}
 
+	// The iofs source reads migrations through an fs.FS, which avoids file URLs
+	// entirely. golang-migrate's file driver keeps the leading slash of a
+	// file:///C:/... URL in the path, and Windows cannot resolve the resulting
+	// /C:/... — so every database-backed test failed on a fresh Windows clone.
+	src, err := iofs.New(os.DirFS(dir), ".")
+	if err != nil {
+		return err
+	}
+
 	// pgx5:// selects golang-migrate's pgx/v5 driver. Migrations always connect
 	// direct to Postgres — golang-migrate takes a session advisory lock, which a
 	// transaction-mode pooler cannot honour.
-	m, err := migrate.New("file://"+dir, strings.Replace(dsn, "postgres://", "pgx5://", 1))
+	m, err := migrate.NewWithSourceInstance("iofs", src, strings.Replace(dsn, "postgres://", "pgx5://", 1))
 	if err != nil {
 		return err
 	}

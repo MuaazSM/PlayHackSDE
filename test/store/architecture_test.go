@@ -12,9 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// sqlstatePattern matches a five-character SQLSTATE literal: two digits or
-// uppercase letters for the class, three for the subclass.
-var sqlstatePattern = regexp.MustCompile(`"[0-9A-Z]{5}"`)
+// sqlstatePattern matches a five-character SQLSTATE literal. PostgreSQL
+// classes start with a digit (23P01, 23505, 40P01; the XX internal class never
+// appears in application code), which keeps the pattern off look-alike
+// literals such as the JWT algorithm names in internal/httpx/oidc.go.
+var sqlstatePattern = regexp.MustCompile(`"[0-9][0-9A-Z]{4}"`)
 
 // TestNoSQLSTATEOutsidePgerr enforces the rule that would otherwise decay the
 // moment someone is in a hurry: exactly one file may inspect a SQLSTATE.

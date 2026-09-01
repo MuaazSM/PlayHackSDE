@@ -66,7 +66,11 @@ func TestRedisFlushMidRun_SystemStillCorrect(t *testing.T) {
 	const slotsEach = 10
 	const total = facilities * slotsEach
 
-	s := newStack(t)
+	// Queue depth above the run's own concurrency, so the shedder cannot fire:
+	// a 429 from the write-queue bound would look exactly like the spurious
+	// rejection this test exists to rule out, and would have nothing to do with
+	// Redis. Shedding is the concurrency suite's subject, not this one's.
+	s := newStack(t, withWriteQueueDepth(total))
 
 	// Ten one-off exclusive facilities, ten hourly windows each. Seeded courts
 	// would not stretch to a hundred non-overlapping windows in one day, and

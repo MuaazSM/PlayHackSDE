@@ -59,6 +59,11 @@ type stackCfg struct {
 	runDispatcher bool
 	runHub        bool
 
+	// writeQueueDepth overrides apiCfg.WriteQueueDepth. Zero keeps the default.
+	// The Redis-flush test sets this above its own concurrency: the shedder is
+	// admission control and a 429 from it would masquerade as a Redis failure.
+	writeQueueDepth int
+
 	// awaitHubReady waits for the Redis subscription before returning. False
 	// only for the outage cases, where there is no subscription to wait for and
 	// waiting would just be a slow way to fail.
@@ -70,12 +75,6 @@ type stackCfg struct {
 }
 
 type stackOpt func(*stackCfg)
-
-// withHubBuffer shrinks the per-connection depth so a consumer can be made to
-// fall behind without publishing thousands of events.
-func withHubBuffer(n int) stackOpt {
-	return func(c *stackCfg) { c.buffer = n }
-}
 
 // withHeartbeat overrides the SSE comment interval.
 func withHeartbeat(d time.Duration) stackOpt {
@@ -100,6 +99,12 @@ func withDeadRedis() stackOpt {
 // With a TTL far longer than the test, a missing key can ONLY be the DEL.
 func withCacheTTL(d time.Duration) stackOpt {
 	return func(c *stackCfg) { c.cacheTTL = d }
+}
+
+// withWriteQueueDepth widens the shedder bound for tests whose concurrency is
+// the point and whose subject is not the queue.
+func withWriteQueueDepth(n int) stackOpt {
+	return func(c *stackCfg) { c.writeQueueDepth = n }
 }
 
 // stack is a running API, a running hub, and a running outbox dispatcher.
@@ -137,12 +142,17 @@ func newStack(t *testing.T, opts ...stackOpt) *stack {
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	require.NoError(t, err)
 
+	depth := config.DefaultWriteQueueDepth
+	if cfg.writeQueueDepth > 0 {
+		depth = cfg.writeQueueDepth
+	}
+
 	apiCfg := &config.Config{
 		DBURL:               pg.DSN,
 		DBMaxConns:          20,
 		AuthMode:            config.AuthModeDev,
 		JWTSecret:           "test-secret",
-		WriteQueueDepth:     config.DefaultWriteQueueDepth,
+		WriteQueueDepth:     depth,
 		WriteTimeout:        5 * time.Second,
 		TZDisplay:           "Asia/Kolkata",
 		RateLimitIPPerMin:   1000000,

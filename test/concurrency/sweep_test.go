@@ -69,15 +69,17 @@ func TestDepthSweep_Diagnostic(t *testing.T) {
 		require.Empty(t, buckets["5xx"], "depth=%d produced unclassified errors", depth)
 
 		r := row{
-			depth:       depth,
-			admitted:    len(buckets["201"]) + len(buckets["409"]),
+			depth: depth,
+			// A 503 is an admitted writer the write timeout retired, so it
+			// belongs on the admitted side of the split, not with the shed.
+			admitted:    len(buckets["201"]) + len(buckets["409"]) + len(buckets["503"]),
 			shed:        len(buckets["429"]),
 			conflictP99: testutil.Percentile(buckets["409"], 99),
 		}
 		rows = append(rows, r)
 
-		t.Logf("depth=%-4d admitted=%-4d shed=%-4d 409_p99=%-14s 429_p99=%s",
-			r.depth, r.admitted, r.shed, r.conflictP99,
+		t.Logf("depth=%-4d admitted=%-4d shed=%-4d 503=%-3d 409_p99=%-14s 429_p99=%s",
+			r.depth, r.admitted, r.shed, len(buckets["503"]), r.conflictP99,
 			testutil.Percentile(buckets["429"], 99))
 	}
 

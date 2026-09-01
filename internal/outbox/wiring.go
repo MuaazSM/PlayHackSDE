@@ -28,13 +28,13 @@ func NotifierFor(cfg *config.Config, log *slog.Logger) (Notifier, error) {
 		if !wp.Configured() {
 			return nil, fmt.Errorf("%w: NOTIFIER=webpush needs VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT", ErrTransportNotConfigured)
 		}
-		return NewWebPushNotifier(wp, log), nil
+		return nil, fmt.Errorf("%w: NOTIFIER=webpush delivery integration is unavailable", ErrTransportUnavailable)
 
 	case "email":
 		if cfg.EmailFrom == "" {
 			return nil, fmt.Errorf("%w: NOTIFIER=email needs EMAIL_FROM", ErrTransportNotConfigured)
 		}
-		return NewEmailNotifier(cfg.EmailFrom, log), nil
+		return nil, fmt.Errorf("%w: NOTIFIER=email delivery integration is unavailable", ErrTransportUnavailable)
 
 	default:
 		return nil, fmt.Errorf("outbox: unknown notifier %q", cfg.NotifierKind)

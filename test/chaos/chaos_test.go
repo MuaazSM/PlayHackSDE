@@ -29,6 +29,7 @@ import (
 	"github.com/iitg-playhack/sportsbook/internal/config"
 	"github.com/iitg-playhack/sportsbook/internal/facility"
 	"github.com/iitg-playhack/sportsbook/internal/httpx"
+	"github.com/iitg-playhack/sportsbook/internal/store"
 	"github.com/iitg-playhack/sportsbook/test/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -332,31 +333,77 @@ func TestRedisFlushMidRun(t *testing.T) {
 // 2. The read path lies.
 // ---------------------------------------------------------------------------
 
-// TestReplicaLagDoesNotCorrupt is the true streaming-replica case, and it does
-// NOT run in this environment.
-//
-// `make dev-replica` brings up a standby on :5433 behind a compose profile, but
-// it has never been brought up here; everything is developed and tested with
-// DB_REPLICA_URL empty, which falls back to the primary and is a supported
-// configuration rather than a degraded one (IMPLEMENTATION.md §2.1). There is
-// therefore no replica to pause, and a test that paused the primary and called
-// it a replica would be measuring something else while claiming this name.
-//
-// TestStaleAvailabilityDoesNotCorruptWrites below covers the property this test
-// would have covered — a read path serving an out-of-date answer cannot cause a
-// wrong booking — by a route that does exist. Set CHAOS_REPLICA_URL to a real
-// standby to run this one.
+// TestReplicaLagDoesNotCorrupt pauses WAL replay on a real streaming standby,
+// proves availability remains stale after a primary commit, and then proves a
+// second write still loses on the primary constraint.
 func TestReplicaLagDoesNotCorrupt(t *testing.T) {
-	url := os.Getenv("CHAOS_REPLICA_URL")
-	if url == "" {
-		t.Skip("SKIPPED: no streaming replica in this environment. `make dev-replica` " +
-			"has never been brought up here and DB_REPLICA_URL falls back to the primary, " +
-			"so there is nothing to pause. Set CHAOS_REPLICA_URL to a standby DSN to run " +
-			"this. See TestStaleAvailabilityDoesNotCorruptWrites for the property under " +
-			"test by a route that does exist.")
+	primaryURL := os.Getenv("CHAOS_PRIMARY_URL")
+	replicaURL := os.Getenv("CHAOS_REPLICA_URL")
+	if primaryURL == "" || replicaURL == "" {
+		t.Skip("set CHAOS_PRIMARY_URL and CHAOS_REPLICA_URL to run the streaming-replica lag test")
 	}
-	t.Fatalf("CHAOS_REPLICA_URL is set (%s) but the replica pause harness is not "+
-		"implemented — do not report this test as passing", url)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	db, err := store.New(ctx, &config.Config{
+		DBURL: primaryURL, DBReplicaURL: replicaURL, DBMaxConns: 20,
+	})
+	require.NoError(t, err)
+	t.Cleanup(db.Close)
+	require.True(t, db.HasDedicatedReplica())
+	pg := &testutil.PG{DB: db, Pool: db.Primary, DSN: primaryURL}
+	pg.Reset(t)
+
+	// Do not pause until the standby has replayed the clean reset and seed data.
+	require.Eventually(t, func() bool {
+		var facilities, bookings int
+		err := db.Replica.QueryRow(context.Background(), `
+			SELECT (SELECT count(*) FROM facilities), (SELECT count(*) FROM bookings)`).
+			Scan(&facilities, &bookings)
+		return err == nil && facilities == 7 && bookings == 0
+	}, 30*time.Second, 200*time.Millisecond, "replica never caught up with the seed")
+	require.NoError(t, func() error {
+		_, pauseErr := db.Replica.Exec(ctx, `SELECT pg_wal_replay_pause()`)
+		return pauseErr
+	}())
+	t.Cleanup(func() {
+		resumeCtx, resumeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer resumeCancel()
+		_, _ = db.Replica.Exec(resumeCtx, `SELECT pg_wal_replay_resume()`)
+	})
+
+	users := pg.Users(t, 2)
+	court := testutil.CourtID()
+	start, end := testutil.Slot18()
+	date := start.In(testutil.IST).Format("2006-01-02")
+
+	availability := facility.NewAvailability(db.Replica, nil, "Asia/Kolkata", nil)
+	before, err := availability.Campus(ctx, date)
+	require.NoError(t, err)
+	require.NotEmpty(t, before.Facilities)
+
+	cat := facility.NewRepo(db.Primary)
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	require.NoError(t, err)
+	svc := booking.NewService(db, cat, loc)
+	_, err = svc.Create(ctx, booking.CreateRequest{
+		FacilityID: court, UserID: users[0], Start: start,
+		Duration: time.Hour, IdemKey: uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	// Replay is paused, so the read path still cannot see the committed winner.
+	var replicaBookings int
+	require.NoError(t, db.Replica.QueryRow(ctx, `SELECT count(*) FROM bookings WHERE facility_id = $1`, court).Scan(&replicaBookings))
+	require.Zero(t, replicaBookings, "replica was not stale while WAL replay was paused")
+
+	_, err = svc.Create(ctx, booking.CreateRequest{
+		FacilityID: court, UserID: users[1], Start: start,
+		Duration: time.Hour, IdemKey: uuid.NewString(),
+	})
+	require.ErrorIs(t, err, booking.ErrSlotTaken)
+	require.Equal(t, 1, confirmed(t, pg, court, start, end),
+		"a stale streaming replica allowed a second primary booking")
 }
 
 // TestStaleAvailabilityDoesNotCorruptWrites is the risk-register line from

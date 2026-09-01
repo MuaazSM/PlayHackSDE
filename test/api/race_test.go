@@ -34,16 +34,21 @@ func TestHTTP_RaceOverHTTP_500Concurrent(t *testing.T) {
 		tokens = append(tokens, a.login(t, roll(i)))
 	}
 	a.pg.Warm(t, 20)
+	// Connections before goroutines: see warmHTTP. Without this the 500-way
+	// dial burst, not the booking path, decides whether the test runs at all.
+	a.warmHTTP(t, n)
 
 	out := testutil.Race(t, n, func(ctx context.Context, i int) (any, error) {
-		resp := a.createBooking(t, tokens[i%len(tokens)], court, start, 60, uuid.NewString())
-		return resp, nil
+		return a.createBookingResult(ctx, tokens[i%len(tokens)], court, start, 60, uuid.NewString())
 	})
 
 	counts := map[int]int{}
 	var serverErrors []response
 	for _, at := range out.Attempts {
-		resp := at.Value.(response)
+		resp, ok := responseFromAttempt(t, at)
+		if !ok {
+			continue
+		}
 		counts[resp.status]++
 		if resp.status >= 500 {
 			serverErrors = append(serverErrors, resp)
@@ -86,14 +91,18 @@ func TestShed_Returns429WhenQueueFull(t *testing.T) {
 	token := a.login(t, "student01")
 	start, _ := testutil.Slot18()
 	a.pg.Warm(t, 10)
+	a.warmHTTP(t, n)
 
 	out := testutil.Race(t, n, func(ctx context.Context, i int) (any, error) {
-		return a.createBooking(t, token, testutil.CourtID(), start, 60, uuid.NewString()), nil
+		return a.createBookingResult(ctx, token, testutil.CourtID(), start, 60, uuid.NewString())
 	})
 
 	counts := map[int]int{}
 	for _, at := range out.Attempts {
-		counts[at.Value.(response).status]++
+		resp, ok := responseFromAttempt(t, at)
+		if ok {
+			counts[resp.status]++
+		}
 	}
 	t.Logf("depth=1 201=%d 409=%d 429=%d", counts[201], counts[409], counts[429])
 
@@ -105,10 +114,14 @@ func TestShed_Returns429WhenQueueFull(t *testing.T) {
 	// during a burst is what keeps the screen honest about who won — a student
 	// shut out of even looking at the grid learns nothing.
 	reads := testutil.Race(t, 40, func(ctx context.Context, i int) (any, error) {
-		return a.do(t, request{method: http.MethodGet, path: "/api/v1/bookings/me", token: token}), nil
+		return a.doResult(ctx, request{method: http.MethodGet, path: "/api/v1/bookings/me", token: token})
 	})
 	for _, at := range reads.Attempts {
-		require.Equalf(t, http.StatusOK, at.Value.(response).status,
+		resp, ok := responseFromAttempt(t, at)
+		if !ok {
+			continue
+		}
+		require.Equalf(t, http.StatusOK, resp.status,
 			"read %d was shed; only the booking write path is bounded", at.Index)
 	}
 }
@@ -122,15 +135,19 @@ func TestShed_RetryAfterHeaderPresent(t *testing.T) {
 	a := newAPI(t, withDepth(1))
 	token := a.login(t, "student01")
 	start, _ := testutil.Slot18()
+	a.warmHTTP(t, n)
 
 	out := testutil.Race(t, n, func(ctx context.Context, i int) (any, error) {
-		return a.createBooking(t, token, testutil.CourtID(), start, 60, uuid.NewString()), nil
+		return a.createBookingResult(ctx, token, testutil.CourtID(), start, 60, uuid.NewString())
 	})
 
 	seen := map[string]int{}
 	var shed int
 	for _, at := range out.Attempts {
-		resp := at.Value.(response)
+		resp, ok := responseFromAttempt(t, at)
+		if !ok {
+			continue
+		}
 		if resp.status != http.StatusTooManyRequests {
 			continue
 		}
@@ -154,4 +171,22 @@ func TestShed_RetryAfterHeaderPresent(t *testing.T) {
 			"Retry-After must be jittered; every shed client returning at the same "+
 				"instant is the same herd on a timer")
 	}
+}
+
+// responseFromAttempt turns worker errors into test failures in the collecting
+// goroutine. It deliberately does not cast until the type assertion succeeds:
+// a failed request has no response value, and casting nil was the source of the
+// old harness panic that hid the actual connection-refusal error.
+func responseFromAttempt(t *testing.T, at testutil.Attempt) (response, bool) {
+	t.Helper()
+	if at.Err != nil {
+		require.NoErrorf(t, at.Err, "HTTP race attempt %d failed", at.Index)
+		return response{}, false
+	}
+	resp, ok := at.Value.(response)
+	if !ok {
+		require.Truef(t, ok, "HTTP race attempt %d returned %T, want response", at.Index, at.Value)
+		return response{}, false
+	}
+	return resp, true
 }

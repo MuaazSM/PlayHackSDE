@@ -24,8 +24,12 @@ func newAvailability(t *testing.T, pg *testutil.PG) (*facility.Availability, *fa
 	return facility.NewAvailability(pg.Pool, nil, "Asia/Kolkata", nil), repo
 }
 
-// today is the local date the seeded slots fall on.
-func today() string { return time.Now().In(testutil.IST).Format("2006-01-02") }
+// today is the local date the seeded slot fixtures fall on. Slot fixtures use
+// tomorrow so they stay valid for evening runs; derive the query date from the
+// same fixture rather than accidentally asking for the real current day.
+func today() string {
+	return testutil.SlotDate()
+}
 
 func slotAt(t *testing.T, day *facility.DayAvailability, start time.Time) facility.Slot {
 	t.Helper()

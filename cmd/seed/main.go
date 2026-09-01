@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	log := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
+	log := slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
 
 	if err := run(log); err != nil {
 		log.Error("seed failed", "err", err)
