@@ -64,14 +64,14 @@ type Attempt struct {
 
 // Report is what one run measured.
 type Report struct {
-	N           int            `json:"n"`
-	Wall        time.Duration  `json:"wall_ns"`
-	ByStatus    map[int]int    `json:"by_status"`
-	Errors      int            `json:"transport_errors"`
-	ConfirmP99  time.Duration  `json:"confirmed_p99_ns"`
-	ConflictP99 time.Duration  `json:"conflict_p99_ns"`
-	ShedP99     time.Duration  `json:"shed_p99_ns"`
-	Failures    []string       `json:"failures"`
+	N           int           `json:"n"`
+	Wall        time.Duration `json:"wall_ns"`
+	ByStatus    map[int]int   `json:"by_status"`
+	Errors      int           `json:"transport_errors"`
+	ConfirmP99  time.Duration `json:"confirmed_p99_ns"`
+	ConflictP99 time.Duration `json:"conflict_p99_ns"`
+	ShedP99     time.Duration `json:"shed_p99_ns"`
+	Failures    []string      `json:"failures"`
 }
 
 // Confirmed counts 201s. A 200 is an idempotent replay, which cannot happen here

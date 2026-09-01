@@ -28,6 +28,12 @@ func classify(a testutil.Attempt) string {
 		return "429"
 	case errors.Is(a.Err, booking.ErrSlotTaken):
 		return "409"
+	case errors.Is(a.Err, context.DeadlineExceeded):
+		// The write timeout doing its job: respond.go maps this to 503
+		// CodeTimeout, a designed bounded-latency outcome. At the sweep
+		// diagnostic's extreme depths admitted writers outlive WRITE_TIMEOUT_MS;
+		// that is the bound being measured, not an unclassified failure.
+		return "503"
 	default:
 		return "5xx"
 	}
@@ -43,7 +49,7 @@ func report(t *testing.T, label string, out testutil.Outcome) map[string][]testu
 	}
 
 	t.Logf("--- %s (n=%d, elapsed=%s, spread=%s)", label, len(out.Attempts), out.Elapsed, out.StartSpread)
-	for _, k := range []string{"201", "409", "429", "5xx"} {
+	for _, k := range []string{"201", "409", "429", "503", "5xx"} {
 		as := buckets[k]
 		if len(as) == 0 {
 			continue

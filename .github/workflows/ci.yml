@@ -64,8 +64,13 @@ jobs:
           go-version-file: go.mod
           check-latest: true
           cache: true
+      # Type-check every package AND its tests for Windows. `go test -run '^$'`
+      # would still execute each package's TestMain, and the database-backed
+      # harnesses start testcontainers there — which GitHub's Windows runners
+      # cannot run (no Linux container support). `go vet` compiles the test
+      # files without executing any of them.
       - name: Compile every package and test for Windows
-        run: go test ./... -run '^$'
+        run: go vet ./...
       - name: Windows unit tests
         run: go test ./internal/... ./test/httpx/... -count=1
 
@@ -161,12 +166,13 @@ jobs:
         if: always()
         run: docker compose -f deploy/docker-compose.yml down -v
 
-  # The 6 PM surge profile: 500 VUs at one slot, with the p99 budgets as failing
-  # thresholds (IMPLEMENTATION.md §14).
+  # The 6 PM surge profile: 500 VUs at one slot (IMPLEMENTATION.md §14).
   #
-  # This is blocking. A latency claim cannot coexist with a red or advisory-only
-  # gate. The local `make load` run remains the release measurement on demo
-  # hardware; CI additionally prevents transport errors and gross regressions.
+  # Blocking here are the invariants that hold on ANY hardware: zero transport
+  # errors, zero 5xx, exactly one winner, contention actually created. The p99
+  # millisecond budgets are a declared-hardware-profile assertion (see
+  # test/load/load_test.go) and stay enforced by `make load` on that profile;
+  # a two-vCPU shared runner cannot honestly measure them.
   load:
     runs-on: ubuntu-latest
     steps:
